@@ -115,7 +115,7 @@ start-debug.bat                              # 同上，带控制台
 
 | 路径 | 用途 |
 | --- | --- |
-| `data/a_market_offline/` | 本地离线 K 线（按股票代码命名的 CSV），选「本地离线数据」时读这里 |
+| `data/a_market_offline/` | 本地离线 K 线，选「本地离线数据」时读这里。文件名形如 `000001.SZ.csv` / `600026.SH.csv` / `830799.BJ.csv`；编码支持 UTF-8 / GBK；必需列 `date open high low close volume`（也认中文表头「交易日 / 开盘价 / 最高价 / 最低价 / 收盘价 / 成交量（手）」），可选 `amount turnover_rate factor` |
 | `data/kline_raw/`、`data/factor/`、`data/ex_dividend/` | 在线数据下载后的本地缓存与复权因子、除权数据 |
 | `data/stock_list.csv`、`data/stock_names.json` | 股票列表与名称，缺失时首次会尝试联网下载（AKShare） |
 | `data/.ai_tester_config.enc` | AI 配置（含 Key），本地加密文件，已被 `.gitignore` 排除 |
