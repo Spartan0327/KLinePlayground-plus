@@ -6538,3 +6538,5 @@ chart_render_temp.html
 *.bak
 *.bak-*
 ai_api_info.json
+# --- IDE ---
+/.idea/
