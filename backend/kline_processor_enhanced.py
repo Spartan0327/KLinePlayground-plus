@@ -14,12 +14,14 @@ class KLineProcessorEnhanced:
         start_date: str,
         source: str = "akshare",
         interval: str = "daily",
+        end_date: Optional[str] = None,
     ):
         self.data_manager = data_manager
         self.stock_code = stock_code
         self.source = source
         self.interval = interval
         self.start_date = pd.to_datetime(start_date)
+        self.end_date = pd.to_datetime(end_date) if end_date else None
         self.adjustment_mode = "forward"
         self.factor_changed = False
 
@@ -42,10 +44,28 @@ class KLineProcessorEnhanced:
             raise ValueError(f"起始日期 {start_date} 之后没有数据")
 
         self.preview_bars = min(80, self.start_index - self.preview_start_index)
+
+        # 结束日期：训练只走到这一天为止，不再把之后的行情喂进来
+        if self.end_date is not None:
+            if self.end_date < self.start_date:
+                raise ValueError(f"结束日期 {end_date} 早于起始日期 {start_date}")
+            trimmed = self.full_data[self.full_data["date"] <= self.end_date].reset_index(drop=True)
+            if trimmed.empty:
+                raise ValueError(f"起始日期 {start_date} 到结束日期 {end_date} 之间没有交易日数据")
+            if len(trimmed) <= self.preview_bars:
+                raise ValueError(
+                    f"起始日期 {start_date} 到结束日期 {end_date} 之间的交易日不足，请把区间拉长一些"
+                )
+            self.full_data = trimmed
+
         self.current_index = self.preview_bars
         self.max_index = len(self.full_data) - 1
         self.bar_id_offset = -self.preview_bars + 1
         self.trade_markers: List[Dict] = []
+        self.cooldown_markers: List[Dict] = []
+        self.cooldown_bars: int = 0
+        self.cooldown_start_index: int = -1
+        self.cooldown_end_index: int = -1
 
         self._prepare_adjustment_data()
 
@@ -256,6 +276,135 @@ class KLineProcessorEnhanced:
     def get_trade_markers(self) -> List[Dict]:
         return self.trade_markers.copy()
 
+    def start_cooldown(self, bars: int):
+        """清仓后开启 N 个交易日的禁买期（到第 N 根 K 线为止）"""
+        if bars is None:
+            return
+        bars = int(bars)
+        if bars <= 0:
+            self.cooldown_end_index = -1
+            self.cooldown_bars = 0
+            return
+        self.cooldown_bars = bars
+        self.cooldown_start_index = self.current_index
+        self.cooldown_end_index = self.current_index + bars
+
+    def _record_cooldown_marker(self):
+        """当前 K 线落在禁买期内时记一个标记"""
+        if self.cooldown_end_index < 0 or self.current_index > self.cooldown_end_index:
+            return
+        if self.current_index >= len(self.full_data):
+            return
+        remaining = self.cooldown_end_index - self.current_index + 1
+        self.cooldown_markers.append(
+            {
+                "bar_id": self.get_current_bar_id(),
+                "time": int(self.full_data.iloc[self.current_index]["date"].timestamp()),
+                "remaining": remaining,
+                "cooldown_bars": self.cooldown_bars,
+            }
+        )
+
+    def get_cooldown_markers(self) -> List[Dict]:
+        return self.cooldown_markers.copy()
+
+    def is_in_cooldown(self) -> bool:
+        if self.cooldown_end_index < 0:
+            return False
+        return self.current_index <= self.cooldown_end_index
+
+    def get_cooldown_remaining(self) -> int:
+        if not self.is_in_cooldown():
+            return 0
+        # 卖出当根不算禁买日，从下一根开始计
+        first_blocked = self.cooldown_start_index + 1
+        return max(0, self.cooldown_end_index - max(self.current_index, first_blocked) + 1)
+
+    def get_divergence_signals(self, view_period: str = "daily", pivot: int = 3, window: int = 60) -> List[Dict]:
+        """顶背离 / 底背离信号，返回可直接作为图表标记的列表
+
+        判定逻辑（只用当前已可见的K线，不含未来数据）：
+        - 拐点：某根K线的高点高于左右各 pivot 根的 High（低点同理取最低）
+        - 顶背离：后一个高点价格更高，但同一根K线的 DIF 更低 → 卖出信号
+        - 底背离：后一个低点价格更低，但同一根K线的 DIF 更高 → 买入信号
+        - 两个拐点间隔需在 5 ~ window 根之间，避免把同一段行情拆成多对
+        只有拐点右侧 pivot 根K线走完才会被确认，所以信号天然滞后 pivot 根出现。
+        """
+        try:
+            adjusted = self._get_adjusted_frame(view_period=view_period, full=False)
+            if adjusted is None or len(adjusted) < max(30, pivot * 2 + 10):
+                return []
+
+            macd = self._calculate_macd(adjusted)
+            dif_by_bar = {item["bar_id"]: item["dif"] for item in macd.get("data", [])}
+            rows = self._to_chart_rows(adjusted)
+            n = len(rows)
+
+            pivot_highs = []
+            pivot_lows = []
+            for i in range(pivot, n - pivot):
+                left = rows[i - pivot:i]
+                right = rows[i + 1:i + pivot + 1]
+                high = rows[i]["high"]
+                low = rows[i]["low"]
+                if all(high > r["high"] for r in left) and all(high > r["high"] for r in right):
+                    pivot_highs.append(i)
+                if all(low < r["low"] for r in left) and all(low < r["low"] for r in right):
+                    pivot_lows.append(i)
+
+            markers = []
+
+            def add_marker(index, kind):
+                row = rows[index]
+                if kind == "top":
+                    markers.append({
+                        "time": row["time"],
+                        "bar_id": row["bar_id"],
+                        "position": "aboveBar",
+                        "color": "#ff4d4f",
+                        "shape": "arrowDown",
+                        "text": "顶背离",
+                        "type": "top_divergence",
+                    })
+                else:
+                    markers.append({
+                        "time": row["time"],
+                        "bar_id": row["bar_id"],
+                        "position": "belowBar",
+                        "color": "#16a34a",
+                        "shape": "arrowUp",
+                        "text": "底背离",
+                        "type": "bottom_divergence",
+                    })
+
+            prev = None
+            for index in pivot_highs:
+                if prev is not None and 5 <= index - prev <= window:
+                    dif_prev = dif_by_bar.get(rows[prev]["bar_id"])
+                    dif_cur = dif_by_bar.get(rows[index]["bar_id"])
+                    if (dif_prev is not None and dif_cur is not None
+                            and rows[index]["high"] > rows[prev]["high"]
+                            and dif_cur < dif_prev):
+                        add_marker(index, "top")
+                prev = index
+
+            prev = None
+            for index in pivot_lows:
+                if prev is not None and 5 <= index - prev <= window:
+                    dif_prev = dif_by_bar.get(rows[prev]["bar_id"])
+                    dif_cur = dif_by_bar.get(rows[index]["bar_id"])
+                    if (dif_prev is not None and dif_cur is not None
+                            and rows[index]["low"] < rows[prev]["low"]
+                            and dif_cur > dif_prev):
+                        add_marker(index, "bottom")
+                prev = index
+
+            markers.sort(key=lambda item: item["time"])
+            return markers
+        except Exception as e:
+            print(f"计算背离信号失败: {e}")
+            return []
+
     def next_bar(self) -> bool:
         self.factor_changed = False
         if self.current_index >= self.max_index:
@@ -266,14 +415,28 @@ class KLineProcessorEnhanced:
         new_factor = self.full_data.iloc[self.current_index]["factor"]
         if self.adjustment_mode == "dynamic_forward" and old_factor != new_factor:
             self.factor_changed = True
+        self._record_cooldown_marker()
         return True
 
     def has_next(self) -> bool:
         return self.current_index < self.max_index
 
+    def get_planned_end_date(self) -> Optional[str]:
+        """本次训练计划走到的最后一天"""
+        try:
+            if self.end_date is not None and self.full_data.iloc[-1]["date"] is not None:
+                return self.end_date.strftime("%Y-%m-%d")
+            return self.full_data.iloc[-1]["date"].strftime("%Y-%m-%d")
+        except Exception:
+            return None
+
     def reset(self):
         self.current_index = self.preview_bars
         self.trade_markers = []
+        self.cooldown_markers = []
+        self.cooldown_bars = 0
+        self.cooldown_start_index = -1
+        self.cooldown_end_index = -1
         self.factor_changed = False
 
     def jump_to_date(self, target_date: str) -> bool:

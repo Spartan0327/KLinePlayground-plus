@@ -74,8 +74,24 @@
             <div class="toolbar-right">
                 <button id="theme-toggle-btn" class="btn btn-secondary">深色主题</button>
                 <button id="data-sync-btn" class="btn btn-secondary">数据更新器</button>
+                <button id="review-history-btn" class="btn btn-secondary">历史问题</button>
                 <button id="settings-btn" class="btn btn-secondary">设置</button>
                 <button id="new-training-btn" class="btn btn-primary">新建训练</button>
+            </div>
+        </div>
+
+        <div id="history-panel" class="history-panel">
+            <div class="history-panel-header">
+                <div>
+                    <h2>历史训练记录</h2>
+                    <p class="history-panel-subtitle">每次训练结束后自动保存报告与 AI 复盘点评，点开任意一条即可回看当时的收益、回撤和交易明细。</p>
+                </div>
+                <button id="history-refresh-btn" class="btn btn-secondary">刷新列表</button>
+            </div>
+            <div id="history-list" class="history-list"></div>
+            <div id="history-empty" class="history-empty hidden">
+                还没有历史训练记录。完成一轮训练（点右侧「结束训练」）后，记录会自动出现在这里。
+                <br>（旧版本训练没有保存明细，无法补录；从这里之后每次训练都会完整记录报告与 AI 点评。）
             </div>
         </div>
 
@@ -129,6 +145,58 @@
                     <label for="enable-ai-api">开启 AI 介入（暴露本地 API 给 AI 测试器读取）</label>
                 </div>
 
+                <div class="settings-section">
+                    <label class="section-title">AI 接口配置（复盘用的模型地址与 Key）</label>
+                    <div class="form-grid">
+                        <div class="form-group">
+                            <label>接口地址 base_url</label>
+                            <input type="text" id="ai-base-url" spellcheck="false"
+                                   placeholder="https://api.deepseek.com/v1">
+                        </div>
+                        <div class="form-group">
+                            <label>模型名</label>
+                            <input type="text" id="ai-model" spellcheck="false" placeholder="deepseek-chat">
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label>API Key</label>
+                        <input type="password" id="ai-api-key" spellcheck="false" autocomplete="off"
+                               placeholder="留空 = 沿用已保存的 Key">
+                        <div class="ai-prompt-actions">
+                            <button type="button" id="ai-config-test-btn" class="btn btn-secondary">测试连接</button>
+                            <button type="button" id="ai-config-clear-btn" class="btn btn-secondary">清除配置</button>
+                        </div>
+                        <p id="ai-config-status" class="field-hint"></p>
+                        <p class="field-hint">配置写入 <code>data/.ai_tester_config.enc</code>（本地加密文件，与命令行工具共用）。保存后下一轮复盘立即生效，无需重启；这里不会显示完整 Key，只显示掩码。</p>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label>AI 复盘提示词（留空 = 使用内置模板）</label>
+                    <textarea id="ai-review-prompt" rows="8" spellcheck="false"
+                              placeholder="留空使用内置模板；也可以在这里写自己的复盘纪律与检查清单。支持占位符：{stock_code} {start_date} {end_date} {total_return} {max_drawdown} {total_trades} {trade_win_rate} {final_capital}"></textarea>
+                    <div class="ai-prompt-actions">
+                        <button type="button" id="fill-default-ai-prompt-btn" class="btn btn-secondary">载入默认模板</button>
+                        <button type="button" id="reset-ai-prompt-btn" class="btn btn-secondary">清空（用默认）</button>
+                    </div>
+                    <p class="field-hint">这段文字会拼在训练数据（基本信息 / 交易明细 / 纪律检查 / 净值曲线特征）之后一起发给模型。留空就退回内置模板。也可以直接用接口改：<code>GET /api/users/&lt;用户名&gt;/ai-review-prompt</code> 读取，<code>PUT</code> 同一地址保存（body 为 <code>{"prompt": "..."}</code>）。</p>
+                </div>
+
+                <div class="form-group">
+                    <label>清仓后禁买期（交易日，0 = 关闭）</label>
+                    <input type="number" id="cooldown-bars-after-flat" step="1" min="0" max="20" value="3">
+                    <p class="field-hint">清仓后接下来 N 根 K 线会在图上标注「禁买」，仅作提示，不会拦截下单。</p>
+                </div>
+
+                <div class="form-group">
+                    <label>成本线辅助（止损 % / 止盈 %，0 = 关闭）</label>
+                    <div class="inline-inputs">
+                        <input type="number" id="stop-loss-percent" step="0.5" min="0" max="50" value="10">
+                        <input type="number" id="take-profit-percent" step="0.5" min="0" max="200" value="20">
+                    </div>
+                    <p class="field-hint">以持仓平均成本为基准：向下为止损线，向上为止盈线，仅在持仓期间显示。价格轴会自动扩展以容纳这两条线。</p>
+                </div>
+
                 <div class="form-group">
                     <label>均线周期（最多 6 个）</label>
                     <div id="ma-periods-editor" class="ma-periods-editor"></div>
@@ -170,6 +238,95 @@
                 <div class="modal-actions">
                     <button id="save-settings-btn" class="btn btn-primary">保存</button>
                     <button id="cancel-settings-btn" class="btn btn-secondary">取消</button>
+                </div>
+            </div>
+        </div>
+
+        <div id="review-history-modal" class="modal hidden">
+            <div class="modal-content review-history-content">
+                <div class="rh-header">
+                    <div>
+                        <h2>历史问题</h2>
+                        <p class="rh-subtitle">每次 AI 复盘后累积的问题档案：AI 记录观察与证据，你负责备注、规则和状态。</p>
+                    </div>
+                    <button id="rh-close-btn" class="btn btn-secondary">关闭</button>
+                </div>
+
+                <div class="rh-stats" id="rh-stats"></div>
+
+                <div class="rh-toolbar">
+                    <input type="text" id="rh-search" placeholder="搜索标题 / 描述 / 备注">
+                    <select id="rh-filter-category"></select>
+                    <select id="rh-filter-ai">
+                        <option value="">全部 AI 观察</option>
+                        <option value="NEW">NEW 新发现</option>
+                        <option value="RECURRED">RECURRED 再次出现</option>
+                        <option value="IMPROVING">IMPROVING 有改善</option>
+                        <option value="NOT_OBSERVED">NOT_OBSERVED 本轮未观察到</option>
+                        <option value="INSUFFICIENT_DATA">INSUFFICIENT_DATA 证据不足</option>
+                    </select>
+                    <select id="rh-filter-user">
+                        <option value="">全部用户状态</option>
+                        <option value="待改进">待改进</option>
+                        <option value="持续观察">持续观察</option>
+                        <option value="已改善">已改善</option>
+                        <option value="已解决">已解决</option>
+                        <option value="暂不处理">暂不处理</option>
+                    </select>
+                    <select id="rh-filter-severity">
+                        <option value="">全部严重度</option>
+                        <option value="HIGH">HIGH</option>
+                        <option value="MEDIUM">MEDIUM</option>
+                        <option value="LOW">LOW</option>
+                    </select>
+                    <button id="rh-refresh-btn" class="btn btn-secondary">刷新</button>
+                </div>
+
+                <div class="rh-toolbar rh-toolbar-secondary">
+                    <button id="rh-export-btn" class="btn btn-secondary">导出 Markdown</button>
+                    <button id="rh-backup-btn" class="btn btn-secondary">备份档案</button>
+                    <select id="rh-backup-list"></select>
+                    <button id="rh-restore-btn" class="btn btn-secondary">从备份恢复</button>
+                    <span id="rh-meta" class="rh-meta"></span>
+                </div>
+
+                <div id="rh-list" class="rh-list"></div>
+                <div id="rh-empty" class="rh-empty hidden">还没有历史问题。先完成一轮 AI 复盘，模型会把问题写进档案。</div>
+
+                <div id="rh-detail" class="rh-detail hidden">
+                    <div class="rh-detail-head">
+                        <h3 id="rh-detail-title"></h3>
+                        <button id="rh-detail-close" class="btn btn-secondary">收起</button>
+                    </div>
+                    <div id="rh-detail-meta" class="rh-detail-meta"></div>
+
+                    <div class="rh-field">
+                        <label>问题描述（你改过之后 AI 不再覆盖）</label>
+                        <textarea id="rh-edit-description" rows="3"></textarea>
+                    </div>
+                    <div class="rh-field">
+                        <label>改进规则</label>
+                        <textarea id="rh-edit-rule" rows="2"></textarea>
+                    </div>
+                    <div class="rh-field">
+                        <label>个人备注</label>
+                        <textarea id="rh-edit-note" rows="2"></textarea>
+                    </div>
+                    <div class="rh-field">
+                        <label>用户维护状态</label>
+                        <select id="rh-edit-status"></select>
+                    </div>
+                    <div class="rh-detail-actions">
+                        <button id="rh-save-btn" class="btn btn-primary">保存修改</button>
+                        <span id="rh-save-hint" class="rh-meta"></span>
+                    </div>
+
+                    <h4>历史证据</h4>
+                    <div id="rh-evidence" class="rh-table-wrap"></div>
+                    <h4>历次 AI 观察</h4>
+                    <div id="rh-observations" class="rh-table-wrap"></div>
+                    <h4>版本记录</h4>
+                    <div id="rh-versions" class="rh-table-wrap"></div>
                 </div>
             </div>
         </div>
@@ -422,20 +579,37 @@
                 <div class="control-section">
                     <h3>交易操作</h3>
                     <div class="trade-controls">
-                        <div class="trade-input">
-                            <label>交易数量（手）</label>
-                            <input type="number" id="trade-quantity" value="1" min="1" max="1">
+                        <div class="trade-slider-row">
+                            <input type="range" id="buy-percent" class="trade-percent-range" min="0" max="100" step="10" value="100" list="trade-percent-ticks">
+                            <span class="trade-percent-value" id="buy-percent-value">100%</span>
+                            <button id="buy-btn" class="btn btn-danger">买入</button>
+                        </div>
+                        <div class="trade-slider-row">
+                            <input type="range" id="sell-percent" class="trade-percent-range" min="0" max="100" step="10" value="100" list="trade-percent-ticks">
+                            <span class="trade-percent-value" id="sell-percent-value">100%</span>
+                            <button id="sell-btn" class="btn btn-success">卖出</button>
+                        </div>
+                        <div class="trade-slider-footer">
+                            <span id="shift-toggle-btn" class="shift-btn" role="button" title="点击或按住 Shift 切换为开盘价交易">⇧ 开盘价</span>
                             <div class="max-quantity-info">
-                                最大可买 <span id="max-buy-quantity">0</span> 手
-                                最大可卖 <span id="max-sell-quantity">0</span> 手
+                                最大可买 <span id="max-buy-quantity">0</span> 手 · 最大可卖 <span id="max-sell-quantity">0</span> 手
                                 <span id="max-quantity" class="hidden">0</span>
                             </div>
                         </div>
-                        <div class="trade-buttons">
-                            <button id="shift-toggle-btn" class="btn btn-secondary shift-btn" title="点击或按住 Shift 切换为开盘价交易">⇧</button>
-                            <button id="buy-btn" class="btn btn-danger"style="padding: 0;">买(收盘)</button>
-                            <button id="sell-btn" class="btn btn-success" style="padding: 0;">卖(收盘)</button>
-                        </div>
+                        <p class="field-hint">拖动滑块决定这一笔用多少仓位：买入按剩余资金折算手数，卖出按可卖持仓折算；共 11 档（0% / 10% / … / 100%），100% = 买满 / 全部卖光，0% = 不下单。</p>
+                        <datalist id="trade-percent-ticks">
+                            <option value="0"></option>
+                            <option value="10"></option>
+                            <option value="20"></option>
+                            <option value="30"></option>
+                            <option value="40"></option>
+                            <option value="50"></option>
+                            <option value="60"></option>
+                            <option value="70"></option>
+                            <option value="80"></option>
+                            <option value="90"></option>
+                            <option value="100"></option>
+                        </datalist>
                     </div>
                 </div>
 
@@ -463,12 +637,51 @@
         <div id="report-interface" class="hidden">
             <div class="report-container">
                 <h2>复盘报告</h2>
-                <div id="report-content"></div>
                 <div class="report-actions">
                     <button id="view-full-chart-btn" class="btn btn-primary">查看完整走势</button>
                     <button id="ai-analyze-btn" class="btn btn-info hidden">AI 智能复盘点评</button>
                     <button id="new-training-from-report-btn" class="btn btn-secondary">开始新训练</button>
                     <button id="return-main-menu-btn" class="btn btn-secondary">返回主菜单</button>
+                </div>
+                <div id="report-content"></div>
+
+                <div id="report-chart-section" class="report-chart-section hidden">
+                    <div class="report-chart-head">
+                        <h3>全程走势与我的收益率</h3>
+                        <div class="chart-scale-toggle">
+                            <span class="scale-label">收益曲线坐标</span>
+                            <button id="equity-scale-linear" class="btn btn-secondary active">线性</button>
+                            <button id="equity-scale-log" class="btn btn-secondary">对数</button>
+                        </div>
+                    </div>
+                    <p class="field-hint">上图为本次回测走过的全部 K 线（含买卖点），下图与它共用同一时间轴，画的是逐根 K 线的资产净值指数：100 = 初始资金，高于 100 赚、低于 100 亏。切到对数坐标后，同样幅度的赚与亏看起来一样大，更容易看出「亏损发生在哪种行情里」。</p>
+                    <div id="report-price-chart" class="report-chart"></div>
+                    <div id="report-equity-chart-wrap" class="report-equity-wrap">
+                        <div id="report-equity-chart" class="report-chart report-equity-chart"></div>
+                        <div id="fill-review-overlay" class="fill-review-overlay"></div>
+                        <div id="fill-review-card" class="fill-review-card hidden" role="dialog" aria-label="成交点评"></div>
+                    </div>
+                </div>
+
+                <div id="key-trade-panel" class="key-trade-panel hidden" role="region" aria-label="重点交易深度点评">
+                    <div class="kt-head">
+                        <div class="kt-head-left">
+                            <span class="kt-badge">★ 重点交易深度点评</span>
+                            <span id="kt-cycle-label" class="kt-cycle-label"></span>
+                        </div>
+                        <button type="button" id="kt-close" class="btn btn-secondary">收起</button>
+                    </div>
+                    <div id="key-trade-body" class="kt-body"></div>
+                </div>
+
+                <div id="fill-review-panel" class="fill-review-panel hidden">
+                    <div class="fr-legend">
+                        <span class="fr-legend-item"><i class="fr-dot fr-dot-buy"></i>买入（红色 ▲）</span>
+                        <span class="fr-legend-item"><i class="fr-dot fr-dot-sell"></i>卖出（绿色 ▼）</span>
+                        <span class="fr-legend-item"><i class="fr-dot fr-dot-key"></i>重点交易（金色 ★）</span>
+                        <span class="fr-legend-hint">曲线只负责定位交易事实：点买卖标记看这一笔的实际成交信息，点金色星标看整周期 AI 深度点评</span>
+                    </div>
+                    <div id="fill-review-notice" class="fr-notice hidden"></div>
                 </div>
             </div>
         </div>

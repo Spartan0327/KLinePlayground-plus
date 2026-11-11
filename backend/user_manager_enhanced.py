@@ -162,3 +162,19 @@ class UserManagerEnhanced:
     def export_training_data(self, username: str, session_id: str, format: str = 'json') -> Optional[str]:
         """导出训练数据"""
         return self.history_manager.export_session_data(username, session_id, format)
+
+    def save_report(self, username: str, session_id: str, report: Dict) -> bool:
+        """保存复盘报告"""
+        return self.history_manager.save_report(username, session_id, report)
+
+    def save_ai_analysis(self, username: str, session_id: str, text: str, model: str = '',
+                         fill_reviews=None, key_trade_reviews=None, review_meta=None) -> bool:
+        """保存 AI 复盘点评（文本 + 可选的结构化成交点评）"""
+        return self.history_manager.save_ai_analysis(
+            username, session_id, text, model,
+            fill_reviews=fill_reviews, key_trade_reviews=key_trade_reviews, review_meta=review_meta,
+        )
+
+    def get_report_and_analysis(self, username: str, session_id: str) -> Dict:
+        """读取报告与 AI 点评"""
+        return self.history_manager.get_report_and_analysis(username, session_id)

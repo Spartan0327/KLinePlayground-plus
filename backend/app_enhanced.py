@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 import sqlite3
 import pandas as pd
 import numpy as np
+from typing import Dict
 
 # 添加当前目录到Python路径
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -17,6 +18,7 @@ from backend.data_manager import DataManager
 from backend.kline_processor_enhanced import KLineProcessorEnhanced
 from backend.trade_simulator_enhanced import TradeSimulatorEnhanced
 from backend.user_manager_enhanced import UserManagerEnhanced
+import backend.review_history as review_history
 
 # 配置Flask以提供静态文件，支持开发环境和 PyInstaller 打包环境
 if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
@@ -131,6 +133,190 @@ def update_user_settings(username):
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+@app.route('/api/users/<username>/ai-review-prompt', methods=['GET'])
+def get_ai_review_prompt_api(username):
+    """读取当前 AI 复盘提示词：自定义内容 + 默认内容 + 实际生效内容"""
+    try:
+        config = user_manager.get_user_config(username)
+        if not config:
+            return jsonify({'error': '用户不存在'}), 404
+        custom, default = get_ai_review_prompt(username)
+        return jsonify({
+            'prompt': custom,
+            'effective': custom.strip() or default,
+            'default_prompt': default,
+            'is_custom': bool(custom.strip()),
+            'max_length': AI_REVIEW_PROMPT_MAX_LEN,
+            'placeholders': sorted(AI_PROMPT_PLACEHOLDERS.keys()),
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/users/<username>/ai-review-prompt', methods=['PUT', 'POST'])
+def update_ai_review_prompt_api(username):
+    """保存 AI 复盘提示词；传空字符串表示恢复默认"""
+    try:
+        data = request.get_json(silent=True) or {}
+        prompt = data.get('prompt', data.get('ai_review_prompt', ''))
+        if prompt is None:
+            prompt = ''
+        if not isinstance(prompt, str):
+            return jsonify({'error': 'prompt 必须是字符串'}), 400
+        prompt = prompt.strip()
+        if len(prompt) > AI_REVIEW_PROMPT_MAX_LEN:
+            return jsonify({'error': f'提示词过长，最多 {AI_REVIEW_PROMPT_MAX_LEN} 字符'}), 400
+
+        config = user_manager.get_user_config(username)
+        if not config:
+            user_manager.create_user(username)
+            config = user_manager.get_user_config(username)
+        if not config:
+            return jsonify({'error': '用户不存在且创建配置失败'}), 404
+        config.setdefault('settings', {})['ai_review_prompt'] = prompt
+        if not user_manager.update_user_config(username, config):
+            return jsonify({'error': '保存失败'}), 500
+
+        return jsonify({
+            'message': '提示词已保存' if prompt else '已恢复默认提示词',
+            'prompt': prompt,
+            'is_custom': bool(prompt),
+            'effective': prompt or DEFAULT_AI_REVIEW_PROMPT,
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/users/<username>/ai-review-prompt/reset', methods=['POST'])
+def reset_ai_review_prompt_api(username):
+    """恢复默认提示词（等价于 PUT 空字符串）"""
+    try:
+        config = user_manager.get_user_config(username)
+        if not config:
+            return jsonify({'error': '用户不存在'}), 404
+        config.setdefault('settings', {})['ai_review_prompt'] = ''
+        if not user_manager.update_user_config(username, config):
+            return jsonify({'error': '保存失败'}), 500
+        return jsonify({'message': '已恢复默认提示词', 'effective': DEFAULT_AI_REVIEW_PROMPT, 'is_custom': False})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/users/<username>/ai-review-issues', methods=['GET'])
+def get_ai_review_issues_api(username):
+    """读取历史问题档案（V2.1 机器协议回写的内容）"""
+    try:
+        config = user_manager.get_user_config(username)
+        if not config:
+            return jsonify({'error': '用户不存在'}), 404
+        data = get_review_issues(username)
+        return jsonify({
+            'schema_version': data.get('schema_version', '1.0'),
+            'updated_at': data.get('updated_at', ''),
+            'count': len(data.get('issues') or []),
+            'issues': data.get('issues') or [],
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/users/<username>/review-history', methods=['GET'])
+def list_review_history(username):
+    """历史问题管理页的数据源：统计 + 筛选后的列表"""
+    try:
+        if not user_manager.get_user_config(username):
+            return jsonify({'error': '用户不存在'}), 404
+        archive = review_history.load(user_manager.users_dir, username)
+        items = review_history.query(
+            archive,
+            category=request.args.get('category', ''),
+            ai_status=request.args.get('ai_status', ''),
+            user_status=request.args.get('user_status', ''),
+            severity=request.args.get('severity', ''),
+            keyword=request.args.get('q', ''),
+        )
+        return jsonify({
+            'schema_version': archive.get('schema_version'),
+            'updated_at': archive.get('updated_at', ''),
+            'review_count': archive.get('review_count', 0),
+            'summary': review_history.summary(archive),
+            'issues': items,
+            'filters': {
+                'categories': list(review_history.CATEGORIES),
+                'ai_statuses': list(review_history.AI_STATUSES),
+                'user_statuses': list(review_history.USER_STATUSES),
+                'severities': list(review_history.SEVERITIES),
+            },
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/users/<username>/review-history/export', methods=['GET'])
+def export_review_history(username):
+    """导出 Markdown（阅读/交接用，JSON 仍是权威数据）"""
+    try:
+        archive = review_history.load(user_manager.users_dir, username)
+        md = review_history.export_markdown(archive)
+        return jsonify({'markdown': md, 'count': len(archive.get('issues') or [])})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/users/<username>/review-history/backups', methods=['GET'])
+def list_review_history_backups(username):
+    try:
+        return jsonify({'backups': review_history.list_backups(user_manager.users_dir, username)})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/users/<username>/review-history/backup', methods=['POST'])
+def create_review_history_backup(username):
+    try:
+        name = review_history.backup(user_manager.users_dir, username)
+        if not name:
+            return jsonify({'error': '还没有历史问题档案可备份'}), 404
+        return jsonify({'success': True, 'name': name})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/users/<username>/review-history/restore', methods=['POST'])
+def restore_review_history(username):
+    try:
+        data = request.get_json() or {}
+        ok, message = review_history.restore(user_manager.users_dir, username, str(data.get('name') or ''))
+        if not ok:
+            return jsonify({'error': message}), 400
+        return jsonify({'success': True, 'message': message})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/users/<username>/review-history/<issue_id>', methods=['GET', 'PUT'])
+def review_history_issue(username, issue_id):
+    """查看单条问题 / 修改用户维护字段（描述、规则、备注、用户状态）"""
+    try:
+        if not user_manager.get_user_config(username):
+            return jsonify({'error': '用户不存在'}), 404
+        archive = review_history.load(user_manager.users_dir, username)
+        issue = next((i for i in archive.get('issues') or [] if i.get('issue_id') == issue_id), None)
+        if not issue:
+            return jsonify({'error': '问题不存在'}), 404
+        if request.method == 'GET':
+            return jsonify({'issue': issue, 'user_statuses': list(review_history.USER_STATUSES)})
+
+        payload = request.get_json() or {}
+        fields = {k: payload.get(k) for k in review_history.USER_FIELDS if k in payload}
+        ok, result = review_history.update_user_fields(user_manager.users_dir, username, issue_id, fields)
+        if not ok:
+            return jsonify({'error': result}), 400
+        return jsonify({'success': True, 'changed': result})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/users/<username>/statistics', methods=['GET'])
 def get_user_statistics(username):
     """获取用户统计信息"""
@@ -212,61 +398,806 @@ def get_ai_config():
         print(f"Failed to load AI config: {e}")
         return None
 
-def analyze_report_with_ai(report):
+AI_CONFIG_NAME = '.ai_tester_config.enc'
+AI_CONFIG_XOR_KEY = 'kline_trainer_secret_key'
+DEFAULT_AI_BASE_URL = 'https://api.deepseek.com/v1'
+DEFAULT_AI_MODEL = 'deepseek-chat'
+
+
+def _ai_config_path() -> str:
+    if getattr(sys, 'frozen', False):
+        return os.path.join(os.path.dirname(sys.executable), '..', 'data', AI_CONFIG_NAME)
+    return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data', AI_CONFIG_NAME)
+
+
+def save_ai_config(config: Dict) -> str:
+    """把配置按主程序读取的格式写回加密文件（XOR + base64，与 set_ai_config.py 一致）"""
+    path = _ai_config_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    text = json.dumps(config, ensure_ascii=False)
+    obfs = "".join(chr(ord(c) ^ ord(AI_CONFIG_XOR_KEY[i % len(AI_CONFIG_XOR_KEY)])) for i, c in enumerate(text))
+    payload = base64.b64encode(obfs.encode('utf-8')).decode('utf-8')
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write(payload)
+    return path
+
+
+def test_ai_connection(base_url, model, api_key) -> str:
+    """用一次极小请求验证地址 / 模型 / Key；返回中文结论"""
+    url = (base_url or '').rstrip('/') + '/chat/completions'
+    try:
+        resp = requests.post(
+            url,
+            headers={'Authorization': 'Bearer ' + (api_key or ''), 'Content-Type': 'application/json'},
+            json={'model': model, 'messages': [{'role': 'user', 'content': '回复两个字：正常'}],
+                  'max_tokens': 16, 'temperature': 0},
+            timeout=30,
+        )
+    except Exception as exc:
+        return '请求失败：%s' % exc
+    if resp.status_code == 200:
+        try:
+            data = resp.json()
+            reply = data['choices'][0]['message']['content'].strip()
+            return '连通成功，模型回复：%s' % reply
+        except Exception:
+            return '返回 200，但响应结构不是 OpenAI 兼容格式，请检查地址'
+    if resp.status_code == 401:
+        return 'Key 无效或未开通（401）。地址与模型名本身是通的'
+    return 'HTTP %d：%s' % (resp.status_code, resp.text[:200])
+
+DEFAULT_COOLDOWN_BARS = 3
+
+
+def get_cooldown_bars_setting(user) -> int:
+    """读取用户设置中的「清仓后禁买期」交易日数，缺省为 3"""
+    try:
+        if not user:
+            return DEFAULT_COOLDOWN_BARS
+        config = user_manager.get_user_config(user)
+        if not config:
+            return DEFAULT_COOLDOWN_BARS
+        value = config.get('settings', {}).get('cooldown_bars_after_flat', DEFAULT_COOLDOWN_BARS)
+        return max(0, int(value))
+    except Exception:
+        return DEFAULT_COOLDOWN_BARS
+
+def get_divergence_settings(user) -> Dict:
+    """读取背离信号设置：show（是否显示，默认开）、pivot（拐点半宽，默认 3）、window（配对最大间隔，默认 60）"""
+    result = {'show': True, 'pivot': 3, 'window': 60}
+    try:
+        if not user:
+            return result
+        config = user_manager.get_user_config(user) or {}
+        settings = config.get('settings', {})
+        if 'show_divergence_signals' in settings:
+            result['show'] = bool(settings.get('show_divergence_signals'))
+        if 'divergence_pivot' in settings:
+            result['pivot'] = max(1, min(10, int(settings.get('divergence_pivot'))))
+        if 'divergence_window' in settings:
+            result['window'] = max(5, min(200, int(settings.get('divergence_window'))))
+    except Exception:
+        pass
+    return result
+
+def build_divergence_markers(kline_processor, training, view_period='daily'):
+    """按用户设置计算背离信号标记，异常时返回空列表"""
+    if view_period != 'daily':
+        return []
+    try:
+        settings = get_divergence_settings(training.get('user'))
+        if not settings['show']:
+            return []
+        return kline_processor.get_divergence_signals(
+            view_period=view_period,
+            pivot=settings['pivot'],
+            window=settings['window'],
+        )
+    except Exception:
+        return []
+
+AI_REVIEW_SYSTEM_PROMPT = (
+    "你是一位专业的量化和主观交易教练，擅长通过交易记录分析交易者的心理和策略问题。"
+)
+
+DEFAULT_AI_REVIEW_PROMPT = """【复盘要求】
+1. 先给结论：这轮训练整体是赚是亏，钱主要在哪几笔赚到、哪几笔亏掉。
+2. 优点：写 1-3 个做对的具体动作，带日期或 Bar 号，不要空泛表扬。
+3. 不足：写 2-3 个代价最大的错误，并判断属于「方向判断错 / 仓位错 / 执行纪律错」中的哪一类。
+4. 纪律检查：结合下面【纪律检查】的结论逐条判断；没有违规也要明确写「未发现违规」。
+5. 行情归因：结合【净值曲线特征】，说明收益与亏损主要发生在哪种行情（单边上涨 / 震荡 / 单边下跌），以及哪一段回撤最该避免。
+6. 改进建议：给 2-4 条下次可以直接执行的规则，必须可量化（例：缩量回踩 MA10 再买；跌破成本 5% 无条件减半）。
+7. 最后一行输出「综合评分：XX/100」，XX 为 0-100 的整数。
+
+【写作要求】
+- 语言简练、直击要害，不要复述报告里已经列出的数字清单。
+- 不要写免责声明和套话，就当作一次严肃的训练复盘。
+"""
+
+# 自定义提示词里可用的占位符，会被替换成本次训练的真实数值
+def _num(value, ndigits=2):
+    """把数字格式化成干净的小数文本，非数字原样返回"""
+    try:
+        return f"{round(float(value), ndigits):.{ndigits}f}"
+    except Exception:
+        return str(value if value is not None else '')
+
+
+AI_PROMPT_PLACEHOLDERS = {
+    'stock_code': lambda r: r.get('stock_code'),
+    'start_date': lambda r: r.get('start_date'),
+    'end_date': lambda r: r.get('end_date'),
+    'initial_capital': lambda r: _num(r.get('initial_capital')),
+    'final_capital': lambda r: _num(r.get('final_capital')),
+    'total_return': lambda r: _num(r.get('total_return')),
+    'max_drawdown': lambda r: _num(r.get('max_drawdown')),
+    'total_trades': lambda r: r.get('total_trades'),
+    'trade_win_rate': lambda r: _num(r.get('trade_win_rate')),
+    'session_win_rate': lambda r: _num(r.get('session_win_rate')),
+    'total_commission': lambda r: _num(r.get('total_commission')),
+    'total_stamp_tax': lambda r: _num(r.get('total_stamp_tax')),
+}
+
+AI_REVIEW_PROMPT_MAX_LEN = 8000
+
+
+def get_ai_review_prompt(username=None):
+    """返回 (用户自定义提示词, 默认提示词)。自定义为空表示使用默认。"""
+    custom = ''
+    if username:
+        try:
+            config = user_manager.get_user_config(username) or {}
+            custom = (config.get('settings') or {}).get('ai_review_prompt') or ''
+        except Exception:
+            custom = ''
+    return str(custom), DEFAULT_AI_REVIEW_PROMPT
+
+
+def _review_settings(username=None) -> Dict:
+    """取与本轮复盘相关的用户设置（禁买期、止损止盈）"""
+    result = {'cooldown_bars_after_flat': DEFAULT_COOLDOWN_BARS, 'stop_loss_percent': 10, 'take_profit_percent': 20}
+    if not username:
+        return result
+    try:
+        config = user_manager.get_user_config(username) or {}
+        settings = config.get('settings') or {}
+        if 'cooldown_bars_after_flat' in settings:
+            result['cooldown_bars_after_flat'] = max(0, int(settings.get('cooldown_bars_after_flat') or 0))
+        if 'stop_loss_percent' in settings:
+            result['stop_loss_percent'] = float(settings.get('stop_loss_percent') or 0)
+        if 'take_profit_percent' in settings:
+            result['take_profit_percent'] = float(settings.get('take_profit_percent') or 0)
+    except Exception:
+        pass
+    return result
+
+
+def build_discipline_check(report, settings) -> str:
+    """按用户纪律规则检查交易流水：清仓后禁买期内是否又买入"""
+    cooldown = int(settings.get('cooldown_bars_after_flat') or 0)
+    trades = sorted(report.get('trade_details') or [], key=lambda t: int(t.get('bar_id') or 0))
+    lines = []
+    shares = 0
+    cooldown_until = 0
+    violations = []
+    for t in trades:
+        bar_id = int(t.get('bar_id') or 0)
+        qty = int(t.get('quantity') or 0) * 100
+        if t.get('action') == 'buy':
+            if cooldown_until and bar_id <= cooldown_until:
+                violations.append((t.get('date'), bar_id, cooldown_until))
+            shares += qty
+        elif t.get('action') == 'sell':
+            shares -= qty
+            if shares <= 0:
+                shares = 0
+                cooldown_until = bar_id + cooldown if cooldown else 0
+
+    lines.append(f"- 清仓后禁买期设置：{cooldown} 个交易日（0 表示关闭）")
+    if not cooldown:
+        lines.append('- 本轮未启用禁买期规则，跳过该项检查')
+    elif not violations:
+        lines.append('- 未发现「清仓后禁买期内又买入」的违规')
+    else:
+        lines.append(f'- 发现 {len(violations)} 次禁买期违规：')
+        for date, bar_id, until in violations:
+            lines.append(f"  · {date}（Bar {bar_id}）在禁买期内买入，禁买期应到 Bar {until}")
+
+    lines.append(
+        f"- 成本线辅助设置：止损 -{settings.get('stop_loss_percent')}%、止盈 +{settings.get('take_profit_percent')}%"
+        "（图上辅助线仅供参考，报告里不含盘中最低/最高，无法逐笔判定是否触碰）"
+    )
+    return '\n'.join(lines)
+
+
+def _fmt_curve_time(value) -> str:
+    """把净值曲线的时间统一成 YYYY-MM-DD（曲线的 time 可能是 unix 秒，也可能是日期字符串）"""
+    try:
+        if isinstance(value, (int, float)):
+            return datetime.fromtimestamp(float(value)).strftime('%Y-%m-%d')
+        text = str(value or '')
+        if text.isdigit() and len(text) >= 9:
+            return datetime.fromtimestamp(float(text)).strftime('%Y-%m-%d')
+        return text
+    except Exception:
+        return str(value)
+
+
+def build_curve_context(report) -> str:
+    """从净值曲线提取行情特征，供模型做收益归因"""
+    curve = report.get('equity_curve') or []
+    if len(curve) < 2:
+        return '- 本轮没有净值曲线数据'
+    lines = []
+    size = len(curve)
+    holding = sum(1 for p in curve if (p.get('position_shares') or 0) > 0)
+    lines.append(f"- 净值曲线共 {size} 个点；有持仓的 K 线 {holding} 根（{round(holding * 100 / size, 1)}%），空仓 {size - holding} 根")
+    lines.append(f"- 期末是否持仓：{'是' if (curve[-1].get('position_shares') or 0) > 0 else '否'}")
+
+    # 最大回撤区间（按净值指数）
+    peak = curve[0]
+    worst = None
+    for p in curve:
+        idx = p.get('equity_index')
+        if idx is None:
+            continue
+        if idx >= (peak.get('equity_index') or 0):
+            peak = p
+        else:
+            depth = ((peak.get('equity_index') or 0) - idx) / (peak.get('equity_index') or 1) * 100
+            if worst is None or depth > worst['depth']:
+                worst = {'depth': depth, 'peak': peak, 'trough': p}
+    if worst:
+        lines.append(
+            f"- 最大回撤 {round(worst['depth'], 2)}%：从 {_fmt_curve_time(worst['peak'].get('time'))} 的高点"
+            f"回落到 {_fmt_curve_time(worst['trough'].get('time'))}"
+        )
+
+    # 单根涨跌最猛的区间
+    best = None
+    worst_bar = None
+    for i in range(1, len(curve)):
+        prev_idx = curve[i - 1].get('equity_index')
+        cur_idx = curve[i].get('equity_index')
+        if not prev_idx or cur_idx is None:
+            continue
+        change = (cur_idx - prev_idx) / prev_idx * 100
+        if best is None or change > best['change']:
+            best = {'change': change, 'time': curve[i].get('time')}
+        if worst_bar is None or change < worst_bar['change']:
+            worst_bar = {'change': change, 'time': curve[i].get('time')}
+    if best:
+        lines.append(f"- 净值单根涨幅最大：{_fmt_curve_time(best['time'])}，{round(best['change'], 2)}%")
+    if worst_bar:
+        lines.append(f"- 净值单根跌幅最大：{_fmt_curve_time(worst_bar['time'])}，{round(worst_bar['change'], 2)}%")
+    return '\n'.join(lines)
+
+
+HISTORY_JSON_START = '<<<TRADE_REVIEW_HISTORY_JSON>>>'
+HISTORY_JSON_END = '<<<END_TRADE_REVIEW_HISTORY_JSON>>>'
+DAILY_BAR_START = '09:30'
+DAILY_BAR_END = '15:00'
+AI_REVIEW_PROMPT_MAX_LEN = 8000
+AI_REVIEW_MAX_CHARS = 110000
+AI_REVIEW_MAX_FILLS = 150   # 单轮送模型的成交上限；超出取最早的 N 笔并在报告里披露
+
+
+def get_review_issues(username) -> Dict:
+    """读取历史问题档案（trade_review_history.json）"""
+    if not username:
+        return review_history.empty_archive('')
+    return review_history.load(user_manager.users_dir, username)
+
+
+def _issues_for_prompt(username) -> str:
+    """只把未解决/观察中的问题传给模型"""
+    if not username:
+        return '[]'
+    archive = review_history.load(user_manager.users_dir, username)
+    payload = review_history.issues_for_prompt(archive)
+    if not payload['issues']:
+        return '[]（本轮首次复盘，暂无历史问题档案）'
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def extract_review_history(text) -> tuple:
+    """抽出机器 JSON 段，返回 (清理后的正文, dict 或 None)"""
+    if not text:
+        return text, None
+    start = text.find(HISTORY_JSON_START)
+    if start < 0:
+        return text, None
+    end = text.find(HISTORY_JSON_END, start)
+    if end < 0:
+        return text[:start].rstrip(), None
+    raw = text[start + len(HISTORY_JSON_START):end].strip()
+    clean = (text[:start] + text[end + len(HISTORY_JSON_END):]).strip()
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return clean, None
+    return clean, data if isinstance(data, dict) else None
+
+
+def merge_review_history(username, payload, review_id='') -> str:
+    """合并进档案；Schema 不合格时不改动原档案"""
+    if not username or not isinstance(payload, dict):
+        return ''
+    result = review_history.apply_ai_updates(user_manager.users_dir, username, payload, review_id)
+    if not result.get('valid'):
+        print('历史问题 JSON 校验失败，已保留原档案：' + '；'.join(result.get('errors') or []))
+        return '历史问题 JSON 校验失败，档案未改动'
+    if result.get('errors'):
+        print('历史问题合并跳过部分条目：' + '；'.join(result['errors']))
+    return f"历史问题档案：新增 {result['created']} 条、更新 {result['updated']} 条、忽略 {result['ignored']} 条"
+
+
+KEY_TRADE_MAX = 3
+
+
+def validate_key_trade_reviews(report, payload) -> Dict:
+    """V2.3：只校验重点交易深度点评，逐笔短评不再生成。
+
+    fill_reviews 恒返回空数组（数据库里的旧逐笔点评继续保留，只是新报告不再产生）；
+    key_trade_reviews 校验周期真实、证据成交真实、最多 KEY_TRADE_MAX 笔。
+    coverage 只披露本轮送模型的成交数、被 150 笔上限截掉的笔数与真实周期数。
+    """
+    mapping = build_fill_mapping(report, max_fills=AI_REVIEW_MAX_FILLS)
+    fills = mapping['fills']
+    by_id = {f['fill_id']: f for f in fills}
+    errors = []
+    cycles = {f['trade_cycle_id'] for f in fills if f.get('trade_cycle_id')}
+
+    if not isinstance(payload, dict):
+        errors.append('本轮回复没有可解析的机器 JSON，无法生成重点交易深度点评')
+        return {
+            'fill_reviews': [], 'key_trade_reviews': [], 'errors': errors,
+            'coverage': {'trades': len(fills), 'used_trades': len(fills),
+                         'skipped_trades': mapping.get('skipped_trades', 0) or 0,
+                         'cycles': len(cycles), 'key_trades': 0},
+        }
+
+    raw_keys = payload.get('key_trade_reviews')
+    keys = []
+    if isinstance(raw_keys, list):
+        cycle_seen = set()
+        for item in raw_keys:
+            if len(keys) >= KEY_TRADE_MAX:
+                errors.append(f'重点交易超过 {KEY_TRADE_MAX} 笔，已截断')
+                break
+            if not isinstance(item, dict):
+                continue
+            cycle = str(item.get('trade_cycle_id') or '').strip()
+            if cycle not in cycles:
+                errors.append(f'跳过不存在的重点交易周期：{cycle or "(空)"}')
+                continue
+            if cycle in cycle_seen:
+                errors.append(f'重点交易周期 {cycle} 重复，只保留第一条')
+                continue
+            cycle_seen.add(cycle)
+            evid_fills = []
+            if isinstance(item.get('evidence_fill_ids'), list):
+                for fid in item['evidence_fill_ids']:
+                    fid = str(fid).strip()
+                    if fid in by_id:
+                        evid_fills.append(fid)
+                    else:
+                        errors.append(f'重点交易 {cycle} 的证据成交 {fid or "(空)"} 不存在，已剔除')
+            def _list_text(v, limit=3):
+                if not isinstance(v, list):
+                    return []
+                return [str(x).strip()[:120] for x in v if str(x).strip()][:limit]
+            keys.append({
+                'trade_cycle_id': cycle,
+                'title': str(item.get('title') or '').strip()[:40],
+                'summary': str(item.get('summary') or '').strip()[:240],
+                'strengths': _list_text(item.get('strengths')),
+                'issues': _list_text(item.get('issues')),
+                'lesson': str(item.get('lesson') or '').strip()[:240],
+                'next_rules': _list_text(item.get('next_rules')),
+                'evidence_fill_ids': evid_fills,
+            })
+    elif raw_keys is not None:
+        errors.append('key_trade_reviews 不是数组，已忽略')
+
+    return {
+        'fill_reviews': [],   # V2.3：逐笔点评不再生成；历史报告的旧数据仍在数据库里，默认不展示
+        'key_trade_reviews': keys,
+        'errors': errors,
+        'coverage': {'trades': len(fills), 'used_trades': len(fills),
+                     'skipped_trades': mapping.get('skipped_trades', 0) or 0,
+                     'cycles': len(cycles), 'key_trades': len(keys)},
+    }
+
+
+# ---------------------------------------------------------------- 成交还原
+
+def _bar_index(report) -> Dict:
+    index = {}
+    for row in report.get('kline_series') or []:
+        try:
+            index[int(row.get('bar_id'))] = row
+        except Exception:
+            continue
+    return index
+
+
+def _ohlc_text(row) -> str:
+    if not row:
+        return 'K线缺失'
+    vol = row.get('volume')
+    vol_text = f"V{_num(vol)}" if vol is not None else 'V缺失'
+    return (f"O{_num(row.get('open'))} H{_num(row.get('high'))} "
+            f"L{_num(row.get('low'))} C{_num(row.get('close'))} {vol_text}")
+
+
+def _bar_ranges(bar_ids) -> str:
+    """把 bar_id 列表压成区间串：10-16,18-22"""
+    ids = sorted({int(b) for b in bar_ids if b})
+    if not ids:
+        return '无'
+    parts = []
+    start = prev = ids[0]
+    for bid in ids[1:]:
+        if bid == prev + 1:
+            prev = bid
+            continue
+        parts.append(f"{start}-{prev}" if start != prev else str(start))
+        start = prev = bid
+    parts.append(f"{start}-{prev}" if start != prev else str(start))
+    return ','.join(parts)
+
+
+def build_fill_mapping(report, max_fills=None) -> Dict:
+    """把成交流水还原成带 fill_id / 交易周期 / 持仓变化的明细
+
+    max_fills: 单轮送模型的成交上限；超出时只取最早的 N 笔（持仓前缀仍然正确），
+    并在返回值里给出 total/used/skipped，供报告显式披露覆盖率。
+    """
+    bars = _bar_index(report)
+    details = sorted(report.get('trade_details') or [], key=lambda t: int(t.get('bar_id') or 0))
+    total_trades = len(details)
+    used_details = details
+    if max_fills and total_trades > max_fills:
+        used_details = details[:max_fills]
+    shares = 0
+    avg_cost = 0.0
+    realized = 0.0
+    cycle = 0
+    cycle_id = ''
+    fills = []
+    mapping_failed = []
+    all_events = []
+
+    for idx, t in enumerate(details, 1):
+        keep = not max_fills or idx <= max_fills
+        fill_id = f"F{idx:03d}" if keep else ''
+        bar_id = int(t.get('bar_id') or 0)
+        qty = int(t.get('quantity') or 0) * 100
+        price = float(t.get('price') or 0)
+        pos_before = shares
+
+        if t.get('action') == 'buy':
+            if pos_before == 0:
+                cycle += 1
+                cycle_id = f"C{cycle:03d}"
+                action_type = '首次建仓' if cycle == 1 else '重新买入'
+            else:
+                action_type = '加仓'
+            avg_cost = (avg_cost * pos_before + price * qty) / (pos_before + qty) if (pos_before + qty) else price
+            shares += qty
+        else:
+            sold = min(qty, pos_before)
+            realized += (price - avg_cost) * sold
+            shares = max(0, pos_before - qty)
+            action_type = '清仓' if shares == 0 else '减仓'
+            if shares == 0:
+                avg_cost = 0.0
+
+        all_events.append({
+            'bar_id': bar_id, 'side': t.get('action'),
+            'price': price, 'quantity': int(t.get('quantity') or 0),
+        })
+        if not keep:
+            continue
+
+        mapped = bar_id in bars
+        if not mapped:
+            mapping_failed.append({'fill_id': fill_id, 'date': t.get('date'), 'bar_id': bar_id})
+        wins = [bid for bid in range(bar_id - 10, bar_id + 6) if bid >= 1 and bid in bars]
+        fills.append({
+            'fill_id': fill_id,
+            'bar_id': bar_id,
+            'date': t.get('date'),
+            'side': t.get('action'),
+            'quantity': int(t.get('quantity') or 0),
+            'price': price,
+            'amount': t.get('amount'),
+            'fee': round(float(t.get('commission') or 0) + float(t.get('stamp_tax') or 0), 2),
+            'position_before': pos_before,
+            'position_after': shares,
+            'action_type': action_type,
+            'trade_cycle_id': cycle_id,
+            'mapping_status': 'OK' if mapped else 'MAPPING_FAILED',
+            'window_bars': wins,
+        })
+    return {
+        'fills': fills,
+        'all_fills': all_events,
+        'mapping_failed': mapping_failed,
+        'cycles': cycle,
+        'total_trades': total_trades,
+        'used_trades': len(fills),
+        'skipped_trades': total_trades - len(fills),
+        'truncated': total_trades > len(fills),
+        'max_fills': max_fills,
+    }
+
+
+def build_fill_context(report, mapping) -> str:
+    """成交明细：逐笔带持仓变化、动作类型、Bar 时间边界、成交前后窗口"""
+    fills = mapping['fills']
+    total = mapping.get('total_trades', len(fills))
+    used = len(fills)
+    coverage = (used / total * 100) if total else 100.0
+    first = f"- 原始成交记录：{total} 条；本次传入：{used} 条（覆盖率 {coverage:.2f}%）；" \
+            f"可映射 Bar：{used - len(mapping['mapping_failed'])} 条；映射失败：{len(mapping['mapping_failed'])} 条；" \
+            f"完整交易周期（全量统计）：{mapping['cycles']} 个"
+    lines = [first]
+    if mapping.get('truncated'):
+        lines.append(
+            f"- 已按单轮上限 {mapping.get('max_fills') or AI_REVIEW_MAX_FILLS} 笔截取最早的 {used} 笔；未覆盖 {mapping['skipped_trades']} 笔"
+            f"（第 {used + 1} 笔及以后，仅计入周期与资金统计，不参与逐笔点评，也不得假装点评过）。"
+        )
+        lines.append(f"- 逐笔点评必须只针对 F001–F{used:03d}，并在报告里写明「本轮覆盖 {used}/{total} 笔」。")
+    lines += [
+        "- 成交方式：按当日收盘价成交，成交时该 Bar 已完成；T+1，当日买入当日不可卖",
+        "- 时间边界：Bar 区间 09:30–15:00；「当根」= 成交 Bar；「前 10 根」为决策时已完成的 K 线；「后 5 根」只能用于事后复盘，禁止当作入场时已知信息",
+        "- 窗口列格式：前 10 根 / 当根 / 后 5 根 中实际存在的 bar_id 区间，明细 OHLCV 见【成交窗口 K 线索引】",
+        "- 配对口径：真实持仓变化还原；同一周期内按平均成本 + FIFO 作为分析约定，不代表券商原始批次",
+        "",
+        "| fill_id | Bar | 日期 | 方向 | 数量 | 价格 | 金额 | 费用 | 持仓变化 | 动作类型 | 周期 | 窗口 | Bar已完成 | 映射 |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+    ]
+    for f in fills:
+        wins = _bar_ranges(f['window_bars'])
+        lines.append(
+            f"| {f['fill_id']} | {f['bar_id']} | {f['date']} | {f['side']} | {f['quantity']}手 | "
+            f"{_num(f['price'])} | {_num(f['amount'])} | {f['fee']:.2f} | "
+            f"{f['position_before']}→{f['position_after']}股 | {f['action_type']} | {f['trade_cycle_id']} | "
+            f"{wins} | 是 | {f['mapping_status']} |"
+        )
+    if mapping['mapping_failed']:
+        lines.append("")
+        lines.append("- MAPPING_FAILED 明细（不得猜测附近 Bar）：")
+        for m in mapping['mapping_failed']:
+            lines.append(f"  · {m['fill_id']} {m['date']} 目标 Bar {m['bar_id']} 不在 K 线数据中")
+    return '\n'.join(lines)
+
+
+def build_kline_windows(report, mapping) -> str:
+    """成交窗口 K 线索引：按 bar_id 去重，多笔共用同一段窗口只写一次"""
+    bars = _bar_index(report)
+    needed = set()
+    for f in mapping['fills']:
+        if f['mapping_status'] != 'OK':
+            continue
+        needed.update(f['window_bars'])
+    if not needed:
+        return '- 没有可用的 K 线窗口（成交 Bar 全部映射失败）'
+    has_vol = sum(1 for bid in needed if bars.get(bid) and bars.get(bid).get('volume') is not None)
+    head = (f"- 窗口 K 线索引，共 {len(needed)} 根（多笔成交共用窗口已去重）；"
+            f"V 取自报告 kline_series 的 volume（单位沿用数据源）")
+    if has_vol < len(needed):
+        head += f"；其中 {len(needed) - has_vol} 根没有成交量（旧报告或数据源缺字段），这些根标记 V缺失"
+    lines = [head]
+    for bid in sorted(needed):
+        row = bars.get(bid)
+        lines.append(f"  Bar{bid} {_fmt_curve_time(row.get('time'))} {DAILY_BAR_START}-{DAILY_BAR_END} {_ohlc_text(row)}")
+    return '\n'.join(lines)
+
+
+def build_bar_snapshots(report, mapping, max_rows=1200) -> str:
+    """逐 Bar 资金与持仓快照：现金、市值、均价、浮盈、累计已实现、仓位、回撤"""
+    curve = report.get('equity_curve') or []
+    if not curve:
+        return '- 本轮没有逐 Bar 快照'
+    total = len(curve)
+    step = 1 if total <= max_rows else int(total / max_rows) + 1
+    picked_ids = {int(p.get('bar_id') or 0) for p in curve[::step]}
+    initial = float(report.get('initial_capital') or 0) or 1.0
+
+    trades_by_bar = {}
+    for f in (mapping.get('all_fills') or mapping['fills']):
+        trades_by_bar.setdefault(f['bar_id'], []).append(f)
+
+    shares = 0
+    avg_cost = 0.0
+    realized = 0.0
+    peak = 0.0
+    lines = [
+        f"- 共 {total} 根 K 线；本次传入 {len(picked_ids)} 行" + (f"（每 {step} 根抽样 1 行）" if step > 1 else '（全部传入）'),
+        '- 格式：Bar 日期 收盘 现金 持仓股 市值 均价 浮盈 累计已实现 总资产 仓位% 回撤%',
+    ]
+
+    for p in curve:
+        bar_id = int(p.get('bar_id') or 0)
+        for f in trades_by_bar.get(bar_id, []):
+            qty = f['quantity'] * 100
+            if f['side'] == 'buy':
+                avg_cost = (avg_cost * shares + f['price'] * qty) / (shares + qty) if (shares + qty) else f['price']
+            else:
+                sold = min(qty, shares)
+                realized += (f['price'] - avg_cost) * sold
+                if shares - qty <= 0:
+                    avg_cost = 0.0
+
+        shares = int(p.get('position_shares') or 0)
+        close = float(p.get('close') or 0)
+        equity = p.get('equity')
+        if equity is None:
+            equity = (float(p.get('equity_index') or 0) / 100.0) * initial
+        cash = p.get('cash')
+        if cash is None:
+            cash = float(equity) - shares * close
+        mv = shares * close
+        unrealized = (close - avg_cost) * shares if shares else 0.0
+        weight = (mv / equity * 100) if equity else 0.0
+        peak = max(peak, float(equity))
+        dd = ((float(equity) - peak) / peak * 100) if peak else 0.0
+
+        if bar_id not in picked_ids:
+            continue
+        lines.append(
+            f"  Bar{bar_id} {_fmt_curve_time(p.get('time'))} C{_num(close)} 现{_num(cash)} "
+            f"持{shares} 值{_num(mv)} 均{_num(avg_cost)} 浮{_num(unrealized)} "
+            f"实{_num(realized)} 总{_num(equity)} 仓{round(weight, 1)}% 回{round(dd, 2)}%"
+        )
+    return '\n'.join(lines)
+
+
+def build_strategy_rules(username) -> str:
+    """把现有交易规则原样交给模型"""
+    s = _review_settings(username)
+    return '\n'.join([
+        f"- 清仓后禁买期：{s.get('cooldown_bars_after_flat')} 个交易日（0 表示关闭）",
+        f"- 止损线：成本价 -{s.get('stop_loss_percent')}%",
+        f"- 止盈线：成本价 +{s.get('take_profit_percent')}%",
+        "- 下单方式：按可用资金/可卖持仓的百分比折算手数（100% = 满仓买入 / 全部卖光，11 档：0%、10%…100%）",
+        "- 成交方式：按当日收盘价成交，T+1（当日买入不可卖）",
+        "- 以上为现有规则原文，不得自行修改参数或新增买卖信号",
+    ])
+
+
+# ---------------------------------------------------------------- 提示词组装
+
+def build_ai_review_messages(report, username=None):
+    """组装 AI 复盘 messages：程序算好数据，模型只做判断"""
+    custom_prompt, default_prompt = get_ai_review_prompt(username)
+    requirements = custom_prompt.strip() or default_prompt
+    requirements = requirements.replace('{historical_issues}', '见下方【历史问题档案】')
+    for key, getter in AI_PROMPT_PLACEHOLDERS.items():
+        try:
+            value = getter(report)
+        except Exception:
+            value = ''
+        requirements = requirements.replace('{' + key + '}', str(value))
+
+    issues_text = _issues_for_prompt(username)
+
+    def _assemble(max_fills):
+        mapping = build_fill_mapping(report, max_fills=max_fills)
+        lines = [
+            "请严格按【复盘要求】中的模板完成本轮 A 股 K 线训练复盘。数据不足的部分按模板标记为「无法判断」，不要编造。",
+            "",
+            "【训练基本信息】",
+            f"- 股票代码: {report.get('stock_code')}（{report.get('stock_name') or ''}）",
+            f"- 训练期间: {report.get('start_date')} 至 {report.get('end_date')}",
+            f"- 初始资金: {_num(report.get('initial_capital'))}",
+            f"- 最终资金: {_num(report.get('final_capital'))}",
+            f"- 总收益率: {_num(report.get('total_return'))}%",
+            f"- 最大回撤: {_num(report.get('max_drawdown', 0))}%",
+            f"- 总交易次数: {report.get('total_trades')}",
+            f"- 交易胜率（按卖出笔数）: {_num(report.get('trade_win_rate'))}%",
+            f"- 局胜率（整轮盈亏）: {_num(report.get('session_win_rate'))}%",
+            f"- 盈利卖出笔数 / 总卖出笔数: {report.get('win_count')} / {report.get('total_sell_trades')}",
+            "",
+            "【策略与纪律规则】",
+            build_strategy_rules(username),
+            "",
+            "【成交记录与持仓还原】",
+            build_fill_context(report, mapping),
+            "",
+            "【成交窗口 K 线索引】",
+            build_kline_windows(report, mapping),
+            "",
+            "【逐 Bar 资金与持仓快照】",
+            build_bar_snapshots(report, mapping),
+            "",
+            "【纪律检查】",
+            build_discipline_check(report, _review_settings(username)),
+            "",
+            "【净值曲线特征】",
+            build_curve_context(report),
+            "",
+            "【历史问题档案】",
+            issues_text,
+            "",
+            "【复盘要求】",
+            requirements,
+        ]
+        content = '\n'.join([ln for ln in lines if ln is not None])
+        return content.replace('\n\n\n', '\n\n'), mapping
+
+    # 先按 150 笔组装；若仍超长，自动把成交上限减半再试，直到够短或已缩到 15 笔
+    limit = AI_REVIEW_MAX_FILLS
+    content, mapping = _assemble(limit)
+    shrink_trace = []
+    while len(content) > AI_REVIEW_MAX_CHARS and mapping['used_trades'] > 15:
+        limit = max(15, mapping['used_trades'] // 2)
+        content, mapping = _assemble(limit)
+        shrink_trace.append(limit)
+    if len(content) > AI_REVIEW_MAX_CHARS:
+        trace_text = f"（已自动把成交上限从 {AI_REVIEW_MAX_FILLS} 笔缩减到 {mapping['used_trades']} 笔仍超长）" if shrink_trace else ''
+        raise ValueError(
+            f"本轮数据约 {len(content)} 字符，超过单次请求上限 {AI_REVIEW_MAX_CHARS}{trace_text}。"
+            "为避免生成遗漏成交的伪完整报告，未发起模型调用；请缩短训练区间或拆分训练后再复盘。"
+        )
+    return [
+        {"role": "system", "content": AI_REVIEW_SYSTEM_PROMPT},
+        {"role": "user", "content": content},
+    ]
+
+
+def analyze_report_with_ai(report, username=None):
+    """返回 (正文, 结构化点评)；结构化点评始终是 dict，供前端曲线消费"""
     ai_config = get_ai_config()
     if not ai_config:
-        return "AI 配置未找到，请在 AI 测试器中配置。"
-    
+        return "AI 配置未找到，请在 AI 测试器中配置。", None
+
     base_url = ai_config.get("base_url", "https://api.openai.com/v1").rstrip('/')
     api_key = ai_config.get("api_key", "")
     model = ai_config.get("model", "gpt-3.5-turbo")
-    
+
     if not api_key:
-        return "AI API Key 未配置，无法进行分析。"
-    
-    prompt = f"""
-请作为一位资深的股票交易教练，对以下A股K线训练的回放复盘报告进行分析、点评和评分（百分制）。
+        return "AI API Key 未配置，无法进行分析。", None
 
-【训练基本信息】
-- 股票代码: {report.get('stock_code')}
-- 训练期间: {report.get('start_date')} 至 {report.get('end_date')}
-- 初始资金: {report.get('initial_capital')}
-- 最终资金: {report.get('final_capital')}
-- 总收益率: {report.get('total_return')}%
-- 最大回撤: {report.get('max_drawdown', 0)}%
-- 总交易次数: {report.get('total_trades')}
-- 交易胜率: {report.get('trade_win_rate')}%
-
-【交易明细】
-"""
-    for t in report.get('trade_details', [])[:150]:
-        prompt += f"- {t.get('date')} {t.get('action')} {t.get('quantity')}手 @ {t.get('price')} (Bar: {t.get('bar_id')})\n"
-        
-    prompt += "\n请给出专业的点评（包括优点、不足和改进建议），并在最后给出一个综合评分（0-100分）。要求语言简练、直击要害。"
+    try:
+        messages = build_ai_review_messages(report, username)
+    except ValueError as e:
+        return str(e), None
 
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json"
     }
-    
+
     payload = {
         "model": model,
-        "messages": [
-            {"role": "system", "content": "你是一位专业的量化和主观交易教练，擅长通过交易记录分析交易者的心理和策略问题。"},
-            {"role": "user", "content": prompt}
-        ],
+        "messages": messages,
         "temperature": 0.7
     }
 
     try:
-        response = requests.post(f"{base_url}/chat/completions", json=payload, headers=headers, timeout=60)
+        response = requests.post(f"{base_url}/chat/completions", json=payload, headers=headers, timeout=120)
         if response.status_code == 200:
             data = response.json()
-            return data['choices'][0]['message']['content']
+            content = data['choices'][0]['message']['content']
+            clean, history = extract_review_history(content)
+            if history:
+                summary = merge_review_history(username, history, report.get('session_id') or '')
+                if summary:
+                    print(summary)
+            structured = validate_key_trade_reviews(report, history)
+            if structured['errors']:
+                print('结构化点评校验提示：' + '；'.join(structured['errors'][:6]))
+            structured['review_id'] = report.get('session_id') or ''
+            structured['model'] = model
+            return clean, structured
         else:
-            return f"AI API请求失败: {response.status_code} {response.text}"
+            return f"AI API请求失败: {response.status_code} {response.text}", None
     except Exception as e:
-        return f"AI 分析请求发生错误: {str(e)}"
+        return f"AI 分析请求发生错误: {str(e)}", None
 
 
 @app.route('/api/system/api_info', methods=['POST', 'DELETE'])
@@ -283,6 +1214,66 @@ def toggle_api_info():
             return jsonify({'message': 'API info hidden'})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+@app.route('/api/system/ai-config', methods=['GET', 'POST', 'DELETE'])
+def ai_config_api():
+    """应用内配置 AI 接口：读当前配置 / 保存 / 清除（写入 data/.ai_tester_config.enc）"""
+    try:
+        if request.method == 'GET':
+            cfg = get_ai_config() or {}
+            key = str(cfg.get('api_key') or '')
+            return jsonify({
+                'configured': bool(cfg),
+                'base_url': cfg.get('base_url') or '',
+                'model': cfg.get('model') or '',
+                'has_key': bool(key),
+                'api_key_masked': (key[:6] + '...' + key[-4:]) if len(key) > 12 else ('已配置' if key else ''),
+                'path': _ai_config_path(),
+            })
+
+        if request.method == 'DELETE':
+            path = _ai_config_path()
+            if os.path.exists(path):
+                backup = path + '.bak-' + datetime.now().strftime('%Y%m%d_%H%M%S')
+                os.rename(path, backup)
+                return jsonify({'message': '已清除 AI 配置', 'backup': os.path.basename(backup)})
+            return jsonify({'message': '当前没有 AI 配置'})
+
+        data = request.get_json() or {}
+        old = get_ai_config() or {}
+        base_url = str(data.get('base_url') or old.get('base_url') or '').strip()
+        model = str(data.get('model') or old.get('model') or '').strip()
+        api_key = str(data.get('api_key') or '').strip() or str(old.get('api_key') or '')
+        if not base_url or not model:
+            return jsonify({'error': '接口地址和模型名不能为空'}), 400
+        if not api_key:
+            return jsonify({'error': 'API Key 不能为空'}), 400
+        cfg = dict(old)
+        cfg.update({'base_url': base_url, 'api_key': api_key, 'model': model})
+        save_ai_config(cfg)
+        masked = (api_key[:6] + '...' + api_key[-4:]) if len(api_key) > 12 else '已配置'
+        return jsonify({'message': '已保存 AI 配置', 'base_url': base_url, 'model': model,
+                        'api_key_masked': masked})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/system/ai-config/test', methods=['POST'])
+def ai_config_test():
+    """用填好的地址 / 模型 / Key 发一次极小请求；Key 留空则沿用已保存的"""
+    try:
+        data = request.get_json() or {}
+        old = get_ai_config() or {}
+        base_url = str(data.get('base_url') or old.get('base_url') or '').strip()
+        model = str(data.get('model') or old.get('model') or '').strip()
+        api_key = str(data.get('api_key') or '').strip() or str(old.get('api_key') or '')
+        if not base_url or not model or not api_key:
+            return jsonify({'ok': False, 'message': '地址 / 模型 / Key 填全后再测试'}), 400
+        message = test_ai_connection(base_url, model, api_key)
+        return jsonify({'ok': message.startswith('连通成功'), 'message': message})
+    except Exception as e:
+        return jsonify({'ok': False, 'message': str(e)}), 500
+
 
 @app.route('/api/training/start', methods=['POST'])
 def start_training():
@@ -301,11 +1292,16 @@ def start_training():
         # 创建训练会话
         training_id = f"{user}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         
+        session_end_date = data.get('end_date')
+
         if mode == 'random':
             # 随机模式
             sector = data.get('sector', 'all')
             date_start = data.get('date_start', '2024-01-01')
             date_end = data.get('date_end', '2026-01-01')
+            # 盲盒的「日期范围」既是抽签范围，也是本次训练的结束日期
+            if not session_end_date:
+                session_end_date = date_end
             try:
                 stock_code, start_date = data_manager.get_random_stock(
                     sector,
@@ -323,6 +1319,9 @@ def start_training():
             
             if not stock_code or not start_date:
                 return jsonify({'error': '股票代码和起始日期不能为空'}), 400
+
+        if session_end_date and pd.to_datetime(session_end_date) <= pd.to_datetime(start_date):
+            return jsonify({'error': f'结束日期 {session_end_date} 必须晚于起始日期 {start_date}'}), 400
         
         # 验证股票代码和日期
         validation_error = data_manager.get_training_validation_error(
@@ -335,7 +1334,14 @@ def start_training():
             return jsonify({'error': validation_error}), 400
         
         # 创建增强版K线处理器和交易模拟器
-        kline_processor = KLineProcessorEnhanced(data_manager, stock_code, start_date, source=data_source, interval=period)
+        kline_processor = KLineProcessorEnhanced(
+            data_manager,
+            stock_code,
+            start_date,
+            source=data_source,
+            interval=period,
+            end_date=session_end_date,
+        )
         trade_simulator = TradeSimulatorEnhanced(user, initial_capital, stock_code)
         
         # 获取用户设置并应用到交易模拟器
@@ -362,11 +1368,31 @@ def start_training():
         }
         
         _update_api_info(user=user)
+
+        # 训练一开始就落库，保证历史记录里能看到这次训练（哪怕一笔都没成交）
+        try:
+            user_manager.start_training_session(user, {
+                'session_id': training_id,
+                'stock_code': stock_code,
+                'stock_name': data_manager.get_stock_name(stock_code),
+                'start_date': start_date,
+                'mode': mode,
+                'initial_capital': trade_simulator.initial_capital,
+                'commission_settings': {
+                    'commission_rate': trade_simulator.commission_rate,
+                    'min_commission': trade_simulator.min_commission,
+                    'stamp_tax_rate': trade_simulator.stamp_tax_rate,
+                },
+            })
+        except Exception as e:
+            print(f"创建训练历史记录失败: {e}")
+
         
         return jsonify({
             'id': training_id,
             'stock_code': stock_code,
             'start_date': start_date,
+            'end_date': kline_processor.get_planned_end_date(),
             'mode': mode,
             'data_source': data_source,
             'period': period
@@ -413,6 +1439,9 @@ def get_training_data(training_id):
             'ma_data': ma_data,
             'progress': progress,
             'trade_markers': kline_processor.get_trade_markers() if view_period == 'daily' else [],
+            'cooldown_markers': kline_processor.get_cooldown_markers() if view_period == 'daily' else [],
+            'cooldown_remaining': kline_processor.get_cooldown_remaining(),
+            'signal_markers': build_divergence_markers(kline_processor, training, view_period),
             'period': training.get('period', 'daily'),
             'view_period': view_period,
             'data_source': training.get('data_source', 'akshare')
@@ -439,7 +1468,8 @@ def next_bar(training_id):
             report = trade_simulator.generate_report(
                 training['stock_code'],
                 training['start_date'],
-                kline_processor.get_current_date()
+                kline_processor.get_current_date(),
+                kline_processor.get_visible_data('daily')
             )
             
             # 保存训练记录
@@ -456,9 +1486,11 @@ def next_bar(training_id):
                 'total_trades': report['total_trades'],
                 'trade_win_rate': report['trade_win_rate'],
                 'session_win_rate': report['session_win_rate'],
+                'max_drawdown': report.get('max_drawdown', 0),
                 'status': 'completed'
             }
             user_manager.save_training_session(training['user'], session_data)
+            user_manager.save_report(training['user'], training_id, report)
             
             return jsonify({
                 'finished': True,
@@ -476,7 +1508,10 @@ def next_bar(training_id):
             'new_bar': current_bar,
             'new_volume': kline_processor.get_current_volume(),
             'progress': kline_processor.get_progress(),
-            'requires_full_refresh': getattr(kline_processor, 'factor_changed', False)
+            'requires_full_refresh': getattr(kline_processor, 'factor_changed', False),
+            'cooldown_markers': kline_processor.get_cooldown_markers(),
+            'cooldown_remaining': kline_processor.get_cooldown_remaining(),
+            'signal_markers': build_divergence_markers(kline_processor, training)
         }
 
         color = '#000000'
@@ -572,6 +1607,8 @@ def get_full_data(training_id):
             'volume_data': volume_data,
             'ma_data': ma_data,
             'trade_markers': kline_processor.get_trade_markers() if view_period == 'daily' else [],
+            'cooldown_markers': kline_processor.get_cooldown_markers() if view_period == 'daily' else [],
+            'signal_markers': build_divergence_markers(kline_processor, training, view_period),
             'period': training.get('period', 'daily'),
             'view_period': view_period,
             'data_source': training.get('data_source', 'akshare')
@@ -602,6 +1639,12 @@ def execute_trade(training_id):
         current_bar = kline_processor.get_current_bar()
         current_price = current_bar['open'] if price_type == 'open' else current_bar['close']
         current_date = kline_processor.get_current_date()
+
+        # 交易前总资产，用于历史记录里的资产变化
+        try:
+            assets_before = trade_simulator.get_account_info(current_date)['total_assets']
+        except Exception:
+            assets_before = None
         
         # 执行交易
         if action == 'buy':
@@ -614,11 +1657,30 @@ def execute_trade(training_id):
         if result['success']:
             # 添加交易标记到K线图
             kline_processor.add_trade_marker(action, current_price)
-            
+
+            # 落库这笔交易，供历史记录回看
+            try:
+                assets_after = trade_simulator.get_account_info(current_date)['total_assets']
+                trade_record = dict(result['trade'])
+                trade_record['total_assets_before'] = assets_before if assets_before is not None else assets_after
+                trade_record['total_assets_after'] = assets_after
+                user_manager.record_trade(training['user'], training_id, trade_record)
+            except Exception as e:
+                print(f"记录交易到历史库失败: {e}")
+
+            # 清仓（持仓归零）后开启禁买冷却期
+            if action == 'sell' and getattr(trade_simulator, 'total_shares', 0) <= 0:
+                cooldown_bars = get_cooldown_bars_setting(training.get('user'))
+                if cooldown_bars > 0:
+                    kline_processor.start_cooldown(cooldown_bars)
+
             return jsonify({
                 'success': True,
                 'trade': result['trade'],
-                'trade_markers': kline_processor.get_trade_markers()
+                'trade_markers': kline_processor.get_trade_markers(),
+                'cooldown_markers': kline_processor.get_cooldown_markers(),
+                'cooldown_remaining': kline_processor.get_cooldown_remaining(),
+                'signal_markers': build_divergence_markers(kline_processor, training)
             })
         else:
             return jsonify({'error': result['message']}), 400
@@ -718,7 +1780,8 @@ def end_training(training_id):
         report = trade_simulator.generate_report(
             training['stock_code'],
             training['start_date'],
-            kline_processor.get_current_date()
+            kline_processor.get_current_date(),
+            kline_processor.get_visible_data('daily')
         )
         
         # 保存训练记录
@@ -735,9 +1798,11 @@ def end_training(training_id):
             'total_trades': report['total_trades'],
             'trade_win_rate': report['trade_win_rate'],
             'session_win_rate': report['session_win_rate'],
+            'max_drawdown': report.get('max_drawdown', 0),
             'status': 'ended'
         }
         user_manager.save_training_session(training['user'], session_data)
+        user_manager.save_report(training['user'], training_id, report)
         
         # 清理训练会话
         # del active_trainings[training_id] # 不要立即删除，因为客户端可能还需要请求 full_data
@@ -884,9 +1949,157 @@ def analyze_report():
         user_config = user_manager.get_user_config(user)
         if not user_config or not user_config.get('settings', {}).get('enable_ai_api', False):
             return jsonify({'error': '未开启AI分析功能'}), 403
-            
-        ai_commentary = analyze_report_with_ai(report)
-        return jsonify({'ai_commentary': ai_commentary})
+
+        # 已经存在点评就直接复用，避免重复消耗 token；要重跑必须显式 force
+        session_id = report.get('session_id')
+        force = bool(data.get('force'))
+        if session_id and not force:
+            try:
+                record = user_manager.get_report_and_analysis(user, session_id)
+                if record.get('ai_analysis'):
+                    return jsonify({'ai_commentary': record['ai_analysis'], 'cached': True})
+            except Exception as e:
+                print(f"读取已存 AI 点评失败（继续重新生成）: {e}")
+
+        ai_commentary, review_result = analyze_report_with_ai(report, user)
+        # 保存到历史库，之后在主菜单里可以随时回看（结构化点评绑同一 session_id）
+        try:
+            if session_id:
+                user_manager.save_ai_analysis(
+                    user, session_id, ai_commentary,
+                    fill_reviews=None,  # V2.3：不再生成逐笔短评；COALESCE 会保留旧报告的旧值
+                    key_trade_reviews=(review_result or {}).get('key_trade_reviews'),
+                    review_meta=review_result,
+                )
+        except Exception as e:
+            print(f"保存 AI 点评失败: {e}")
+        return jsonify({'ai_commentary': ai_commentary, 'cached': False})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/users/<username>/history', methods=['GET'])
+def list_user_training_history(username):
+    """列出该用户的全部历史训练记录"""
+    try:
+        limit = request.args.get('limit', default=100, type=int)
+        history = user_manager.get_training_history(username, limit=limit)
+        return jsonify({'history': history, 'total': len(history)})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/users/<username>/history/<session_id>', methods=['GET'])
+def get_training_history_detail(username, session_id):
+    """读取某次训练的保存报告与 AI 点评"""
+    try:
+        record = user_manager.get_report_and_analysis(username, session_id)
+        summary = None
+        for item in user_manager.get_training_history(username, limit=500):
+            if item.get('session_id') == session_id:
+                summary = item
+                break
+        return jsonify({
+            'session': summary,
+            'report': record.get('report'),
+            'ai_analysis': record.get('ai_analysis'),
+            'ai_updated_at': record.get('ai_updated_at')
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/users/<username>/history/<session_id>', methods=['DELETE'])
+def delete_training_history(username, session_id):
+    """删除某条历史训练记录（含对应的复盘报告与 AI 点评）"""
+    try:
+        ok = user_manager.delete_training_session(username, session_id)
+        if not ok:
+            return jsonify({'error': '删除失败，记录可能已不存在'}), 404
+        return jsonify({'success': True, 'session_id': session_id})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/users/<username>/history/<session_id>/ai', methods=['POST'])
+def analyze_history_session(username, session_id):
+    """对已保存的历史训练重新做 AI 点评（已有点评则直接复用）"""
+    try:
+        user_config = user_manager.get_user_config(username)
+        if not user_config or not user_config.get('settings', {}).get('enable_ai_api', False):
+            return jsonify({'error': '未开启AI分析功能'}), 403
+
+        record = user_manager.get_report_and_analysis(username, session_id)
+        if record.get('ai_analysis'):
+            return jsonify({'ai_commentary': record['ai_analysis'], 'cached': True})
+
+        report = record.get('report')
+        if not report:
+            return jsonify({'error': '这次训练没有保存报告，无法做 AI 复盘'}), 404
+
+        if not report.get('session_id'):
+            report['session_id'] = session_id
+
+        ai_commentary, review_result = analyze_report_with_ai(report, user)
+        try:
+            user_manager.save_ai_analysis(
+                username, session_id, ai_commentary,
+                fill_reviews=None,  # V2.3：不再生成逐笔短评；COALESCE 会保留旧报告的旧值
+                key_trade_reviews=(review_result or {}).get('key_trade_reviews'),
+                review_meta=review_result,
+            )
+        except Exception as e:
+            print(f"保存 AI 点评失败: {e}")
+        return jsonify({'ai_commentary': ai_commentary, 'cached': False})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/users/<username>/history/<session_id>/fill-reviews', methods=['GET'])
+def get_fill_reviews(username, session_id):
+    """读取某次复盘的结构化点评（曲线交互用）
+
+    V2.3：新报告只写 key_trade_reviews。接口地址沿用旧名（不改路由，避免破坏旧前端），
+    fill_reviews 字段标记为 legacy——旧报告里 V2.2 生成的逐笔短评仍原样返回，新版界面不再展示。
+    """
+    try:
+        record = user_manager.get_report_and_analysis(username, session_id)
+        reviews = record.get('fill_reviews') or []
+        keys = record.get('key_trade_reviews') or []
+        meta = record.get('review_meta') or {}
+        report = record.get('report') or {}
+        fills = []
+        coverage = {'trades': 0, 'used_trades': 0, 'skipped_trades': 0, 'cycles': 0, 'key_trades': len(keys)}
+        if report:
+            mapping = build_fill_mapping(report, max_fills=AI_REVIEW_MAX_FILLS)
+            fills = [{
+                'fill_id': f['fill_id'],
+                'bar_id': f['bar_id'],
+                'date': f['date'],
+                'side': f['side'],
+                'quantity': f['quantity'],
+                'price': f['price'],
+                'action_type': f['action_type'],
+                'trade_cycle_id': f['trade_cycle_id'],
+                'position_before': f['position_before'],
+                'position_after': f['position_after'],
+                'mapping_status': f['mapping_status'],
+            } for f in mapping['fills']]
+            coverage = {
+                'trades': mapping.get('total_trades', len(fills)),
+                'used_trades': mapping.get('used_trades', len(fills)),
+                'skipped_trades': mapping.get('skipped_trades', 0),
+                'cycles': len({f['trade_cycle_id'] for f in fills if f.get('trade_cycle_id')}),
+                'key_trades': len(keys),
+            }
+        return jsonify({
+            'session_id': session_id,
+            'available': bool(keys or reviews),
+            'has_ai_analysis': bool(record.get('ai_analysis')),
+            'fill_reviews': reviews,           # legacy：V2.2 逐笔短评，V2.3 界面不再展示
+            'legacy_fill_reviews': True,
+            'key_trade_reviews': keys,
+            'fills': fills,
+            'coverage': coverage,
+            'errors': meta.get('errors') or [],
+            'review_id': meta.get('review_id') or '',
+            'model': meta.get('model') or record.get('ai_model') or '',
+        })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 

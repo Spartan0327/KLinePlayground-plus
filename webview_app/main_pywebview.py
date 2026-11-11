@@ -24,16 +24,44 @@ if project_root not in sys.path:
 from backend.app_enhanced import app
 
 class KLineTrainerApp:
+    # WebView2 / Chromium 会拒绝加载这些“不安全端口”（如 5060 SIP、6000 X11 等），
+    # 一旦随机分到就会显示 ERR_UNSAFE_PORT，白屏打不开界面
+    UNSAFE_PORTS = {
+        2049, 3659, 4045,
+        5060, 5061,
+        6000,
+        6566,
+        6665, 6666, 6667, 6668, 6669,
+        6697,
+        10080,
+    }
+
     def __init__(self):
         self.flask_app = app
         self.server = None
         self.port = self.find_free_port()
-        
+
     def find_free_port(self):
-        """查找可用端口"""
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind(('127.0.0.1', 0))
-            return s.getsockname()[1]
+        """查找可用端口；避开 WebView2 会判定为不安全的端口"""
+        for _ in range(50):
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(('127.0.0.1', 0))
+                port = s.getsockname()[1]
+            if port not in self.UNSAFE_PORTS:
+                return port
+
+        # 兜底：系统分配的端口都不合适时，在固定安全区间里找一个
+        for port in range(5001, 5100):
+            if port in self.UNSAFE_PORTS:
+                continue
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.bind(('127.0.0.1', port))
+                return port
+            except OSError:
+                continue
+
+        raise RuntimeError('未找到可用端口')
         
     def start_flask_server(self):
         """启动Flask服务器"""

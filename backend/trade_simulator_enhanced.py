@@ -506,9 +506,96 @@ class TradeSimulatorEnhanced:
         """获取包含bar ID的交易历史"""
         return self.trade_history.copy()
     
-    def generate_report(self, stock_code: str, start_date: str, end_date: str) -> Dict:
+    def _calculate_max_drawdown(self, kline_rows) -> float:
+        """按「逐根K线的资产净值」计算最大回撤（%）
+
+        净值 = 现金 + 持仓市值(按当根收盘价)，从初始资金起步逐根推进，
+        记录历史峰值与最大回撤幅度。没有行情数据时返回 0。
+        """
+        if not kline_rows:
+            return 0.0
+
+        rows = sorted(kline_rows, key=lambda r: r['bar_id'])
+        trades_by_bar = {}
+        for trade in self.trade_history:
+            trades_by_bar.setdefault(trade['bar_id'], []).append(trade)
+
+        cash = float(self.initial_capital)
+        shares = 0
+        peak = float(self.initial_capital)
+        max_drawdown = 0.0
+
+        for row in rows:
+            for trade in trades_by_bar.get(row['bar_id'], []):
+                if trade['action'] == 'buy':
+                    cash -= float(trade['net_amount'])
+                    shares += int(trade['quantity']) * 100
+                else:
+                    cash += float(trade['net_amount'])
+                    shares -= int(trade['quantity']) * 100
+
+            equity = cash + shares * float(row['close'])
+            if equity > peak:
+                peak = equity
+            if peak > 0:
+                drawdown = (peak - equity) / peak * 100
+                if drawdown > max_drawdown:
+                    max_drawdown = drawdown
+
+        return round(max_drawdown, 2)
+
+    def _build_equity_curve(self, kline_rows) -> List[Dict]:
+        """逐根 K 线重建资产净值，返回可直接画图的收益曲线
+
+        每根 K 线的净值 = 现金 + 持仓市值（按当根收盘价），并按初始资金折算成
+        净值指数（初始资金 = 100），便于线性/对数两套坐标共用同一份数据。
+        """
+        if not kline_rows:
+            return []
+
+        rows = sorted(kline_rows, key=lambda r: r['bar_id'])
+        # 只看训练段（bar_id >= 1）；起始日之前的 80 根预览不画进收益曲线
+        training_rows = [r for r in rows if int(r.get('bar_id') or 0) >= 1]
+        rows = training_rows or rows
+        trades_by_bar = {}
+        for trade in self.trade_history:
+            trades_by_bar.setdefault(trade['bar_id'], []).append(trade)
+
+        cash = float(self.initial_capital)
+        shares = 0
+        base = float(self.initial_capital) or 1.0
+        curve = []
+
+        for row in rows:
+            for trade in trades_by_bar.get(row['bar_id'], []):
+                if trade['action'] == 'buy':
+                    cash -= float(trade['net_amount'])
+                    shares += int(trade['quantity']) * 100
+                else:
+                    cash += float(trade['net_amount'])
+                    shares -= int(trade['quantity']) * 100
+
+            equity = cash + shares * float(row['close'])
+            curve.append({
+                'bar_id': row['bar_id'],
+                'time': row['time'],
+                # 净值指数：初始资金 = 100
+                'equity_index': round(equity / base * 100, 4),
+                'return_pct': round((equity / base - 1) * 100, 4),
+                'close': float(row['close']),
+                'position_shares': shares,
+                # 现金与总资产（绝对金额，供 AI 复盘引用逐 Bar 快照）
+                'cash': round(cash, 2),
+                'equity': round(equity, 2),
+            })
+
+        return curve
+
+    def generate_report(self, stock_code: str, start_date: str, end_date: str, kline_rows=None) -> Dict:
         """生成复盘报告"""
         account_info = self.get_account_info(end_date)
+        max_drawdown = self._calculate_max_drawdown(kline_rows)
+        equity_curve = self._build_equity_curve(kline_rows)
         
         # 计算交易统计
         buy_trades = [t for t in self.trade_history if t['action'] == 'buy']
@@ -553,6 +640,7 @@ class TradeSimulatorEnhanced:
             'initial_capital': self.initial_capital,
             'final_capital': account_info['total_assets'],
             'total_return': account_info['total_return'],
+            'max_drawdown': max_drawdown,
             'total_trades': total_trades,
             'trade_win_rate': trade_win_rate,  # 交易胜率
             'session_win_rate': session_win_rate,  # 局胜率
@@ -561,6 +649,23 @@ class TradeSimulatorEnhanced:
             'total_commission': total_commission,
             'total_stamp_tax': total_stamp_tax,
             'trade_details': trade_details,
+            'equity_curve': equity_curve,
+            'kline_series': [
+                {
+                    'time': row['time'],
+                    'open': float(row['open']),
+                    'high': float(row['high']),
+                    'low': float(row['low']),
+                    'close': float(row['close']),
+                    'volume': float(row['volume']) if row.get('volume') is not None else None,
+                    'bar_id': row.get('bar_id'),
+                }
+                for row in sorted(
+                    [r for r in (kline_rows or []) if int(r.get('bar_id') or 0) >= 1]
+                    or (kline_rows or []),
+                    key=lambda r: r['bar_id'],
+                )
+            ],
             'commission_settings': {
                 'commission_rate': self.commission_rate,
                 'min_commission': self.min_commission,
