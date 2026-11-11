@@ -6531,3 +6531,10 @@ __pycache__/
 *.exe
 *.7z
 chart_render_temp.html
+# --- local env & secrets (not for public repo) ---
+/.venv/
+/KLinePlayground.lnk
+*.enc
+*.bak
+*.bak-*
+ai_api_info.json

@@ -519,8 +519,24 @@ async function initializeApp() {
         applyTheme(currentTheme, false, false);
         updatePeriodBadge('daily');
         await loadDataSources();
-        // 检查是否有保存的用户
-        const savedUser = localStorage.getItem('currentUser');
+        // 检查是否有保存的用户：先取真实用户列表，避免本地残留指向已删除用户
+        let knownUsers = [];
+        let usersLoaded = false;
+        try {
+            const res = await fetch(`${API_BASE}/users`);
+            const list = await res.json();
+            if (Array.isArray(list)) {
+                knownUsers = list;
+                usersLoaded = true;
+            }
+        } catch (error) {
+            console.error('加载用户列表失败:', error);
+        }
+        let savedUser = localStorage.getItem('currentUser');
+        if (savedUser && usersLoaded && !knownUsers.includes(savedUser)) {
+            localStorage.removeItem('currentUser');
+            savedUser = null;
+        }
         if (savedUser) {
             currentUser = savedUser;
             document.getElementById('current-username').textContent = savedUser;
