@@ -4366,7 +4366,7 @@ function renderReportCharts(report) {
 
     applyEquityScaleMode(reportEquityIsLog);
 
-    // V2.2：把 AI 成交点评接到收益曲线上
+    // V2.3：成交事实标记 + 重点交易深度面板接到收益曲线上
     loadFillReviewsForReport(report);
 }
 
