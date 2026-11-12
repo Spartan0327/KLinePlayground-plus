@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>A股K线复盘训练器</title>
     <link rel="icon" href="data:;base64,iVBORw0KGgo=">
-    <link rel="stylesheet" href="css/style_enhanced.css?v=20261113l">
+    <link rel="stylesheet" href="css/style_enhanced.css?v=20261113o">
     <script src="js/lightweight-charts.standalone.production.js"></script>
     <style>
         .checkbox-inline-row {
@@ -711,14 +711,14 @@
                             <button id="equity-scale-log" class="btn btn-secondary">对数</button>
                         </div>
                     </div>
-                    <p class="field-hint">上图为本次回测走过的全部 K 线（含买卖点、MA5/10/20 均线与成交量柱），下图与它共用同一时间轴，画的是逐根 K 线的资产净值指数：100 = 初始资金，高于 100 赚、低于 100 亏。切到对数坐标后，同样幅度的赚与亏看起来一样大，更容易看出「亏损发生在哪种行情里」。</p>
+                    <p class="field-hint">上图为本次回测走过的全部 K 线（含买卖点与 MA5/10/20 均线；较新的报告还会在底部显示成交量柱），下图与它共用同一时间轴，画的是逐根 K 线的资产净值指数：100 = 初始资金，高于 100 赚、低于 100 亏。切到对数坐标后，同样幅度的赚与亏看起来一样大，更容易看出「亏损发生在哪种行情里」。</p>
                     <div id="report-price-chart-wrap" class="report-price-wrap">
                         <div id="report-price-chart" class="report-chart"></div>
                         <div class="report-chart-legend" aria-hidden="true">
                             <span><i style="background:#d8a11a"></i>MA5</span>
                             <span><i style="background:#2f7fd0"></i>MA10</span>
                             <span><i style="background:#2a9d8f"></i>MA20</span>
-                            <span><i class="vol"></i>成交量</span>
+                            <span id="report-volume-legend"><i class="vol"></i>成交量</span>
                         </div>
                         <div id="report-bar-highlight" class="report-bar-highlight hidden"></div>
                     </div>
@@ -752,6 +752,6 @@
     </div>
 
     <script src="js/marked.min.js"></script>
-    <script src="js/main_enhanced.js?v=20261113l"></script>
+    <script src="js/main_enhanced.js?v=20261113o"></script>
 </body>
 </html>

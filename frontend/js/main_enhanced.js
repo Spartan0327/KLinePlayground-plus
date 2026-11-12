@@ -4406,24 +4406,29 @@ function renderReportCharts(report) {
     })));
 
     // 成交量：与训练日K一致，红涨绿跌，压在价格图底部
-    const volumeSeries = reportPriceChart.addSeries(LightweightCharts.HistogramSeries, {
-        priceScaleId: 'volume',
-        priceFormat: { type: 'volume' },
-        priceLineVisible: false,
-        lastValueVisible: false,
-    });
-    volumeSeries.setData(kline.map((row) => ({
-        time: row.time,
-        value: Number(row.volume) || 0,
-        color: reportVolumeColor(row),
-    })));
-    try {
-        reportPriceChart.priceScale('volume').applyOptions({
-            scaleMargins: { top: 0.8, bottom: 0.02 },
-            visible: false,
+    // 旧报告可能没有保存 volume，此时不创建量能副轴，避免价格被压成一条窄带
+    const hasVolume = kline.some((row) => Number(row.volume) > 0);
+    document.getElementById('report-volume-legend')?.classList.toggle('hidden', !hasVolume);
+    if (hasVolume) {
+        const volumeSeries = reportPriceChart.addSeries(LightweightCharts.HistogramSeries, {
+            priceScaleId: 'volume',
+            priceFormat: { type: 'volume' },
+            priceLineVisible: false,
+            lastValueVisible: false,
         });
-    } catch (e) {
-        console.warn('成交量坐标设置失败:', e);
+        volumeSeries.setData(kline.map((row) => ({
+            time: row.time,
+            value: Number(row.volume) || 0,
+            color: reportVolumeColor(row),
+        })));
+        try {
+            reportPriceChart.priceScale('volume').applyOptions({
+                scaleMargins: { top: 0.8, bottom: 0.02 },
+                visible: false,
+            });
+        } catch (e) {
+            console.warn('成交量坐标设置失败:', e);
+        }
     }
 
     // MA5 / MA10 / MA20：与训练日K的均线语义保持一致
