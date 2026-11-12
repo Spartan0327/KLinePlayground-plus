@@ -1687,6 +1687,72 @@ body[data-theme="dark"] .history-item {
     overflow: hidden;
 }
 
+.report-price-wrap {
+    position: relative;
+}
+
+.report-bar-highlight {
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 10px;
+    bottom: 0;
+    pointer-events: none;
+    overflow: hidden;
+    z-index: 5;
+}
+
+.report-bar-highlight.hidden {
+    display: none;
+}
+
+.report-bar-highlight-bar {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 10px;
+    background: rgba(240, 190, 60, 0.22);
+    border-left: 2px solid rgba(240, 190, 60, 0.9);
+    border-right: 2px solid rgba(240, 190, 60, 0.9);
+    box-shadow: 0 0 14px rgba(240, 190, 60, 0.35);
+}
+
+.report-chart-legend {
+    position: absolute;
+    left: 12px;
+    top: 16px;
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    font-size: 11px;
+    color: var(--text-muted);
+    pointer-events: none;
+    z-index: 7;
+}
+
+.report-chart-legend span {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 1px 5px;
+    border-radius: 4px;
+    background: transparent;
+    text-shadow: 0 1px 2px var(--bg-soft);
+}
+
+.report-chart-legend i {
+    display: inline-block;
+    width: 9px;
+    height: 2px;
+    border-radius: 2px;
+}
+
+.report-chart-legend i.vol {
+    width: 8px;
+    height: 8px;
+    background: linear-gradient(90deg, rgba(226, 85, 85, 0.6), rgba(27, 154, 100, 0.6));
+}
+
 .report-chart.report-equity-chart {
     height: 180px;
     margin-top: 6px;
@@ -2070,6 +2136,13 @@ body[data-theme="dark"] .history-item {
     border-left: 1px dashed rgba(184, 134, 11, 0.55);
     border-right: 1px dashed rgba(184, 134, 11, 0.55);
     border-radius: 4px;
+}
+
+.fr-cycle-band.fr-cycle-active,
+.fr-key-marker.fr-cycle-active {
+    background: rgba(240, 190, 60, 0.32);
+    box-shadow: 0 0 16px rgba(240, 190, 60, 0.55);
+    border-color: #f0be3c;
 }
 
 .fill-review-card {
@@ -2579,6 +2652,113 @@ body[data-theme="dark"] .history-item {
     gap: 8px;
 }
 
+/* 重点交易点评：常驻在收益曲线下方，悬停联动 K 线 */
+.key-trade-list {
+    margin: 16px 0 8px;
+}
+
+.key-trade-list.hidden {
+    display: none;
+}
+
+.ktl-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-bottom: 8px;
+}
+
+.ktl-count {
+    margin-left: 8px;
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
+.ktl-hint {
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
+.ktl-cards {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.ktl-card {
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: var(--bg-soft);
+    padding: 12px 14px;
+    cursor: pointer;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease;
+}
+
+.ktl-card:hover,
+.ktl-card:focus-visible,
+.ktl-card.ktl-card-active {
+    border-color: #e8cf8a;
+    box-shadow: 0 8px 24px rgba(160, 120, 20, 0.16);
+    transform: translateY(-1px);
+}
+
+.ktl-card-head {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    padding-bottom: 8px;
+    border-bottom: 1px dashed var(--border);
+}
+
+.ktl-card-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.ktl-card-title strong {
+    font-size: 14px;
+}
+
+.ktl-card-meta {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
+.ktl-section {
+    margin-top: 10px;
+}
+
+.ktl-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 8px 18px;
+}
+
+.ktl-label {
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--text-muted);
+    margin-bottom: 4px;
+}
+
+.ktl-bullets {
+    margin: 0;
+    padding-left: 18px;
+    font-size: 13px;
+    line-height: 1.65;
+}
+
+.ktl-bullets li {
+    margin-bottom: 3px;
+}
+
 @media (max-width: 760px) {
     .key-trade-panel {
         position: fixed;
@@ -2594,13 +2774,20 @@ body[data-theme="dark"] .history-item {
 }
 
 /* AI 实时陪练 */
+.coach-entry-group .btn-block {
+    width: 100%;
+}
+
 .ai-coach-panel {
     position: fixed;
     right: 18px;
     bottom: 18px;
     width: 380px;
-    max-width: calc(100vw - 36px);
-    max-height: 72vh;
+    height: 520px;
+    min-width: 320px;
+    min-height: 320px;
+    max-width: calc(100vw - 20px);
+    max-height: 86vh;
     display: flex;
     flex-direction: column;
     background: var(--bg-soft);
@@ -2610,6 +2797,7 @@ body[data-theme="dark"] .history-item {
     box-shadow: 0 18px 46px rgba(0, 0, 0, 0.28);
     z-index: 3000;
     overflow: hidden;
+    resize: both;
 }
 
 .ai-coach-head {
@@ -2619,6 +2807,13 @@ body[data-theme="dark"] .history-item {
     gap: 8px;
     padding: 10px 12px;
     border-bottom: 1px solid var(--border);
+    cursor: move;
+    user-select: none;
+}
+
+.ai-coach-head-actions,
+.ai-coach-icon-btn {
+    cursor: pointer;
 }
 
 .ai-coach-title {

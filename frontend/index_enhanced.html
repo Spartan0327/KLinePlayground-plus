@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>A股K线复盘训练器</title>
     <link rel="icon" href="data:;base64,iVBORw0KGgo=">
-    <link rel="stylesheet" href="css/style_enhanced.css">
+    <link rel="stylesheet" href="css/style_enhanced.css?v=20261113l">
     <script src="js/lightweight-charts.standalone.production.js"></script>
     <style>
         .checkbox-inline-row {
@@ -522,7 +522,6 @@
                     <h3>训练控制</h3>
                     <div class="training-controls">
                         <div id="training-progress" class="progress-info">进度: 0%</div>
-                        <button id="ai-coach-btn" class="btn btn-info">AI 陪练</button>
                         <button id="end-training-btn" class="btn btn-warning">结束训练</button>
                         <button id="reset-training-btn" class="btn btn-secondary">重置训练</button>
                     </div>
@@ -552,6 +551,9 @@
                                 <input type="checkbox" id="toggle-chip-distribution">
                                 <span>显示筹码分布</span>
                             </label>
+                        </div>
+                        <div class="setting-group coach-entry-group">
+                            <button id="ai-coach-btn" class="btn btn-info btn-block">AI 陪练</button>
                         </div>
                     </div>
                 </div>
@@ -709,24 +711,23 @@
                             <button id="equity-scale-log" class="btn btn-secondary">对数</button>
                         </div>
                     </div>
-                    <p class="field-hint">上图为本次回测走过的全部 K 线（含买卖点），下图与它共用同一时间轴，画的是逐根 K 线的资产净值指数：100 = 初始资金，高于 100 赚、低于 100 亏。切到对数坐标后，同样幅度的赚与亏看起来一样大，更容易看出「亏损发生在哪种行情里」。</p>
-                    <div id="report-price-chart" class="report-chart"></div>
+                    <p class="field-hint">上图为本次回测走过的全部 K 线（含买卖点、MA5/10/20 均线与成交量柱），下图与它共用同一时间轴，画的是逐根 K 线的资产净值指数：100 = 初始资金，高于 100 赚、低于 100 亏。切到对数坐标后，同样幅度的赚与亏看起来一样大，更容易看出「亏损发生在哪种行情里」。</p>
+                    <div id="report-price-chart-wrap" class="report-price-wrap">
+                        <div id="report-price-chart" class="report-chart"></div>
+                        <div class="report-chart-legend" aria-hidden="true">
+                            <span><i style="background:#d8a11a"></i>MA5</span>
+                            <span><i style="background:#2f7fd0"></i>MA10</span>
+                            <span><i style="background:#2a9d8f"></i>MA20</span>
+                            <span><i class="vol"></i>成交量</span>
+                        </div>
+                        <div id="report-bar-highlight" class="report-bar-highlight hidden"></div>
+                    </div>
                     <div id="report-equity-chart-wrap" class="report-equity-wrap">
                         <div id="report-equity-chart" class="report-chart report-equity-chart"></div>
                         <div id="fill-review-overlay" class="fill-review-overlay"></div>
                         <div id="fill-review-card" class="fill-review-card hidden" role="dialog" aria-label="成交点评"></div>
                     </div>
-                </div>
-
-                <div id="key-trade-panel" class="key-trade-panel hidden" role="region" aria-label="重点交易深度点评">
-                    <div class="kt-head">
-                        <div class="kt-head-left">
-                            <span class="kt-badge">★ 重点交易深度点评</span>
-                            <span id="kt-cycle-label" class="kt-cycle-label"></span>
-                        </div>
-                        <button type="button" id="kt-close" class="btn btn-secondary">收起</button>
-                    </div>
-                    <div id="key-trade-body" class="kt-body"></div>
+                    <div id="key-trade-list" class="key-trade-list hidden"></div>
                 </div>
 
                 <div id="fill-review-panel" class="fill-review-panel hidden">
@@ -751,6 +752,6 @@
     </div>
 
     <script src="js/marked.min.js"></script>
-    <script src="js/main_enhanced.js"></script>
+    <script src="js/main_enhanced.js?v=20261113l"></script>
 </body>
 </html>

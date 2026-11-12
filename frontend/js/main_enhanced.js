@@ -784,6 +784,7 @@ function setupEventListeners() {
     document.getElementById('ai-coach-btn')?.addEventListener('click', () => toggleCoachPanel());
     document.getElementById('ai-coach-close-btn')?.addEventListener('click', () => toggleCoachPanel(false));
     document.getElementById('ai-coach-clear-btn')?.addEventListener('click', () => resetCoachChat(false));
+    setupCoachDrag();
     document.getElementById('ai-coach-send-btn')?.addEventListener('click', () => sendCoachQuestion(document.getElementById('ai-coach-input')?.value));
     document.getElementById('ai-coach-input')?.addEventListener('keydown', (event) => {
         if (event.key === 'Enter' && !event.shiftKey) {
@@ -862,6 +863,13 @@ function setupKeyboardShortcuts() {
         }
         // 只在训练界面激活快捷键
         if (document.getElementById('training-interface').classList.contains('hidden') || isViewOnlyMode) {
+            return;
+        }
+
+        // 焦点在输入框、文本域、下拉框或可编辑区域时，不抢空格/数字/回车等按键
+        const target = event.target;
+        const tagName = target && target.tagName ? target.tagName.toLowerCase() : '';
+        if (tagName === 'input' || tagName === 'textarea' || tagName === 'select' || (target && target.isContentEditable)) {
             return;
         }
 
@@ -1327,7 +1335,7 @@ function renderAICommentarySection(commentary, cached = false) {
         const rendered = typeof marked !== 'undefined' ? marked.parse(parts.appendix) : parts.appendix.replace(/\n/g, '<br>');
         appendixHtml = `
             <details class="ai-fold">
-                <summary>展开附录：全部成交逐笔点评 / 重点交易深度点评 / 历史问题证据</summary>
+                <summary>展开附录：历史问题证据</summary>
                 <div class="ai-content">${rendered}</div>
             </details>`;
     }
@@ -1352,11 +1360,13 @@ function renderAICommentarySection(commentary, cached = false) {
  */
 function splitCommentaryForFold(commentary) {
     const lines = String(commentary || '').split('\n');
-    const idx = lines.findIndex(line => /^[#*\s]*附录\s*A/.test(line.trim()));
-    if (idx < 0) return { main: commentary, appendix: '' };
+    const aIdx = lines.findIndex(line => /^[#*\s]*附录\s*A/.test(line.trim()));
+    if (aIdx < 0) return { main: commentary, appendix: '' };
+    const bIdx = lines.findIndex((line, index) => index > aIdx && /^[#*\s]*附录\s*B/.test(line.trim()));
+    // 附录A（重点交易深度点评）改由曲线下方的结构化卡片展示，不再塞进折叠附录。
     return {
-        main: lines.slice(0, idx).join('\n').trim(),
-        appendix: lines.slice(idx).join('\n').trim()
+        main: lines.slice(0, aIdx).join('\n').trim(),
+        appendix: bIdx > aIdx ? lines.slice(bIdx).join('\n').trim() : ''
     };
 }
 
@@ -4281,6 +4291,7 @@ async function requestAIAnalysis(force = false) {
  * 复盘：全程K线 + 同步时间轴的收益曲线（线性/对数可切换）
  */
 let reportPriceChart = null;
+let reportPriceSeries = null;
 let reportEquityChart = null;
 let reportEquitySeries = null;
 let reportEquityIsLog = false;
@@ -4292,8 +4303,28 @@ function disposeReportCharts() {
         try { instance.remove(); } catch (e) { /* 忽略已销毁的实例 */ }
     });
     reportPriceChart = null;
+    reportPriceSeries = null;
     reportEquityChart = null;
     reportEquitySeries = null;
+}
+
+function reportMovingAverage(kline, period) {
+    const out = [];
+    let sum = 0;
+    for (let i = 0; i < kline.length; i += 1) {
+        const close = Number(kline[i].close);
+        sum += close;
+        if (i >= period) sum -= Number(kline[i - period].close);
+        if (i >= period - 1 && isFinite(sum)) {
+            out.push({ time: kline[i].time, value: Number((sum / period).toFixed(3)) });
+        }
+    }
+    return out;
+}
+
+function reportVolumeColor(row) {
+    const up = Number(row.close) >= Number(row.open);
+    return up ? 'rgba(226, 85, 85, 0.38)' : 'rgba(27, 154, 100, 0.38)';
 }
 
 function applyEquityScaleMode(isLog) {
@@ -4353,10 +4384,11 @@ function renderReportCharts(report) {
 
     reportPriceChart = LightweightCharts.createChart(priceEl, {
         ...baseOptions,
-        width: priceEl.clientWidth,
+        width: priceEl.clientWidth || 520,
         height: 280,
     });
-    const priceSeries = reportPriceChart.addSeries(LightweightCharts.CandlestickSeries, {
+    try { reportPriceChart.resize(priceEl.clientWidth || 520, 280); } catch (e) { /* 忽略 */ }
+    reportPriceSeries = reportPriceChart.addSeries(LightweightCharts.CandlestickSeries, {
         upColor: 'rgba(255, 77, 79, 0)',
         downColor: palette.negative,
         borderUpColor: palette.positive,
@@ -4365,13 +4397,49 @@ function renderReportCharts(report) {
         wickDownColor: palette.negative,
         borderVisible: true,
     });
-    priceSeries.setData(kline.map((row) => ({
+    reportPriceSeries.setData(kline.map((row) => ({
         time: row.time,
         open: row.open,
         high: row.high,
         low: row.low,
         close: row.close,
     })));
+
+    // 成交量：与训练日K一致，红涨绿跌，压在价格图底部
+    const volumeSeries = reportPriceChart.addSeries(LightweightCharts.HistogramSeries, {
+        priceScaleId: 'volume',
+        priceFormat: { type: 'volume' },
+        priceLineVisible: false,
+        lastValueVisible: false,
+    });
+    volumeSeries.setData(kline.map((row) => ({
+        time: row.time,
+        value: Number(row.volume) || 0,
+        color: reportVolumeColor(row),
+    })));
+    try {
+        reportPriceChart.priceScale('volume').applyOptions({
+            scaleMargins: { top: 0.8, bottom: 0.02 },
+            visible: false,
+        });
+    } catch (e) {
+        console.warn('成交量坐标设置失败:', e);
+    }
+
+    // MA5 / MA10 / MA20：与训练日K的均线语义保持一致
+    const maColors = ['#d8a11a', '#2f7fd0', '#2a9d8f'];
+    [5, 10, 20].forEach((period, index) => {
+        const ma = reportMovingAverage(kline, period);
+        if (!ma.length) return;
+        const maSeries = reportPriceChart.addSeries(LightweightCharts.LineSeries, {
+            color: maColors[index],
+            lineWidth: 1,
+            priceLineVisible: false,
+            lastValueVisible: false,
+            title: `MA${period}`,
+        });
+        maSeries.setData(ma);
+    });
 
     // 买卖点标记
     const timeByBarId = {};
@@ -4386,12 +4454,12 @@ function renderReportCharts(report) {
             text: `${trade.action === 'buy' ? '买' : '卖'}${trade.quantity}手`,
         }));
     if (markers.length && LightweightCharts.createSeriesMarkers) {
-        LightweightCharts.createSeriesMarkers(priceSeries, markers);
+        LightweightCharts.createSeriesMarkers(reportPriceSeries, markers);
     }
 
     reportEquityChart = LightweightCharts.createChart(equityEl, {
         ...baseOptions,
-        width: equityEl.clientWidth,
+        width: equityEl.clientWidth || 520,
         height: 180,
         rightPriceScale: { borderColor: palette.border, minimumWidth: 76, scaleMargins: { top: 0.12, bottom: 0.12 } },
         timeScale: { ...baseOptions.timeScale, visible: true },
@@ -4453,6 +4521,18 @@ function renderReportCharts(report) {
         reportEquityChart.timeScale().fitContent();
     } catch (e) { /* 忽略 */ }
 
+    // 报告页刚取消 hidden 时容器可能还没完成布局，下一帧再按真实宽度重排
+    requestAnimationFrame(() => {
+        const w = priceEl.clientWidth || 520;
+        if (reportPriceChart) {
+            reportPriceChart.resize(w, 280);
+            reportPriceChart.timeScale().fitContent();
+        }
+        if (reportEquityChart) {
+            reportEquityChart.resize(equityEl.clientWidth || w, 180);
+        }
+    });
+
     applyEquityScaleMode(reportEquityIsLog);
 
     // V2.3：成交事实标记 + 重点交易深度面板接到收益曲线上
@@ -4481,6 +4561,9 @@ let frState = {
     loading: false,
     activeKey: null,        // 当前打开的事实卡片（bar_id|side）
     activeCycle: null,      // 当前打开的重点交易周期
+    hoverCycle: null,       // 当前悬停的重点交易周期（用于 K 线柱高亮）
+    hoverRestoreRange: null,// 悬停时若自动滚动，记录原来的可视区间
+    hoverRangeApplied: false,
     anchor: null,
     baseTimeIndex: null,
 };
@@ -4541,9 +4624,11 @@ function frReset(report) {
     frState.loading = false;
     frState.activeKey = null;
     frState.activeCycle = null;
+    frState.hoverCycle = null;
     frState.baseTimeIndex = null;
     frCloseCard();
-    frCloseKeyPanel();
+    frClearCycleHighlight();
+    document.getElementById('key-trade-list')?.classList.add('hidden');
     const overlay = document.getElementById('fill-review-overlay');
     if (overlay) overlay.innerHTML = '';
     document.querySelector('.rule-check-section')?.remove();
@@ -4597,6 +4682,7 @@ async function loadFillReviewsForReport(report) {
 
         document.getElementById('fill-review-panel')?.classList.remove('hidden');
         frRenderOverlay();
+        frRenderKeyTradeList();
         frRenderRuleCheck();
         frUpdateNotice();
     } catch (e) {
@@ -4669,14 +4755,14 @@ function frUpdateNotice() {
     const fs = frState;
     const cov = fs.coverage || {};
     if (!fs.hasAi) {
-        frSetNotice('本次复盘还没有 AI 点评。买卖标记仍可查看每一笔实际成交的日期、价格、数量与持仓变化；生成 AI 点评后才会出现金色重点交易深度点评。', 'info');
+        frSetNotice('本次复盘还没有 AI 点评。买卖标记仍可查看每一笔实际成交的日期、价格、数量与持仓变化；生成 AI 点评后，重点交易会列出在曲线下方，并支持悬停联动高亮。', 'info');
         return;
     }
     if (!fs.keys.length) {
         frSetNotice('本轮 AI 没有选出达到深评标准的重点交易。只对完整交易周期做深度点评，小仓位试错、普通止盈与常规减仓不单独点评。', 'info');
         return;
     }
-    let text = '本轮精选 ' + fs.keys.length + ' 笔重点交易，点金色星标查看整周期深度点评；其余成交只在曲线上标注事实位置。';
+    let text = '本轮精选 ' + fs.keys.length + ' 笔重点交易，已列在收益曲线下方。鼠标移到卡片上，对应 K 线 Bar 会高亮；点证据编号可定位到那一笔成交。';
     if (cov.trades && cov.used_trades && cov.trades > cov.used_trades) {
         text += '本轮共 ' + cov.trades + ' 笔成交，按 150 笔上限只把前 ' + cov.used_trades + ' 笔送给模型，其余 ' + (cov.skipped_trades || 0) + ' 笔不在 AI 分析范围内。';
     }
@@ -4792,6 +4878,7 @@ function frRenderOverlay() {
         const maxX = Math.max.apply(null, xs);
         const band = document.createElement('div');
         band.className = 'fr-cycle-band';
+        band.dataset.cycle = k.trade_cycle_id;
         band.style.left = (minX - 6) + 'px';
         band.style.width = Math.max(12, maxX - minX + 12) + 'px';
         overlay.appendChild(band);
@@ -4807,15 +4894,223 @@ function frRenderOverlay() {
         btn.style.top = (first.y - 34) + 'px';
         btn.addEventListener('click', (ev) => {
             ev.stopPropagation();
-            const panel = document.getElementById('key-trade-panel');
-            if (frState.activeCycle === k.trade_cycle_id && panel && !panel.classList.contains('hidden')) {
-                frCloseKeyPanel();
-                return;
-            }
-            frOpenKeyPanel(k);
+            frSelectCycle(k.trade_cycle_id, true);
         });
         overlay.appendChild(btn);
     });
+}
+
+function frCycleFills(cycleId) {
+    return (frState.fills || []).filter((f) => f.trade_cycle_id === cycleId);
+}
+
+function frCyclePeriod(cycleId) {
+    const fills = frCycleFills(cycleId);
+    const first = fills[0] || null;
+    const last = fills.length ? fills[fills.length - 1] : null;
+    const closed = last && Number(last.position_after) === 0;
+    if (!first) return { fills, first: null, last: null, closed: false, text: '时间缺失' };
+    const start = `${first.date}${frBarTimeOf(first.bar_id) ? ' ' + frBarTimeOf(first.bar_id) : ''}`;
+    return {
+        fills,
+        first,
+        last,
+        closed,
+        text: `${start} → ${closed && last ? last.date : '期末仍持仓'}`,
+    };
+}
+
+function frListHtml(values, emptyText) {
+    if (!Array.isArray(values) || !values.length) return `<div class="fr-muted">${emptyText}</div>`;
+    return `<ul class="ktl-bullets">${values.map((t) => `<li>${escapeHtml(t)}</li>`).join('')}</ul>`;
+}
+
+function frKeyTradeCard(k) {
+    const meta = frCyclePeriod(k.trade_cycle_id);
+    const evid = (k.evidence_fill_ids || [])
+        .map((fid) => `<button type="button" class="fr-chip" data-key-fill="${escapeHtml(fid)}">${escapeHtml(fid)}</button>`)
+        .join(' ');
+    return `<article class="ktl-card" data-cycle="${escapeHtml(k.trade_cycle_id)}" tabindex="0">
+        <header class="ktl-card-head">
+            <div class="ktl-card-title">
+                <span class="kt-badge">★ 重点交易</span>
+                <strong>${escapeHtml(k.title || '未命名周期')}</strong>
+            </div>
+            <div class="ktl-card-meta">
+                <span class="fr-mono">${escapeHtml(k.trade_cycle_id)}</span>
+                <span>${meta.fills.length} 笔成交</span>
+                <span>${meta.closed ? '已清仓' : '期末仍持仓'}</span>
+                <span>${escapeHtml(meta.text)}</span>
+            </div>
+        </header>
+        <div class="ktl-section">
+            <div class="ktl-label">AI 总体评价</div>
+            <div class="kt-text">${escapeHtml(k.summary || '无')}</div>
+        </div>
+        <div class="ktl-grid">
+            <div class="ktl-section">
+                <div class="ktl-label">主要优点</div>
+                ${frListHtml(k.strengths, '无')}
+            </div>
+            <div class="ktl-section">
+                <div class="ktl-label">核心问题</div>
+                ${frListHtml(k.issues, '无')}
+            </div>
+        </div>
+        <div class="ktl-section">
+            <div class="ktl-label">经验总结</div>
+            <div class="kt-text">${escapeHtml(k.lesson || '无')}</div>
+        </div>
+        <div class="ktl-section">
+            <div class="ktl-label">后续改进建议</div>
+            ${frListHtml(k.next_rules, '无')}
+        </div>
+        <div class="ktl-section">
+            <div class="ktl-label">证据成交 <span class="ktl-hint">点击定位到曲线上那一笔</span></div>
+            <div class="fr-chips">${evid || '<span class="fr-muted">无</span>'}</div>
+        </div>
+    </article>`;
+}
+
+function frRenderKeyTradeList() {
+    const list = document.getElementById('key-trade-list');
+    if (!list) return;
+    const keys = frState.keys || [];
+    if (!keys.length) {
+        list.classList.add('hidden');
+        list.innerHTML = '';
+        return;
+    }
+    list.innerHTML = `
+        <div class="ktl-head">
+            <div>
+                <span class="kt-badge">★ 重点交易点评</span>
+                <span class="ktl-count">本轮 ${keys.length} 笔</span>
+            </div>
+            <span class="ktl-hint">鼠标移到卡片上，对应 K 线 Bar 会高亮</span>
+        </div>
+        <div class="ktl-cards">${keys.map(frKeyTradeCard).join('')}</div>`;
+    list.classList.remove('hidden');
+
+    list.querySelectorAll('.ktl-card').forEach((card) => {
+        const cycle = card.dataset.cycle;
+        card.addEventListener('mouseenter', () => frHighlightCycle(cycle));
+        card.addEventListener('mouseleave', () => frClearCycleHighlight());
+        card.addEventListener('focusin', () => frHighlightCycle(cycle));
+        card.addEventListener('focusout', () => frClearCycleHighlight());
+        card.addEventListener('click', (ev) => {
+            if (ev.target.closest('[data-key-fill]')) return;
+            frSelectCycle(cycle, true);
+        });
+    });
+    list.querySelectorAll('[data-key-fill]').forEach((btn) => {
+        btn.addEventListener('click', (ev) => {
+            ev.stopPropagation();
+            frFocusFill(btn.dataset.keyFill);
+        });
+    });
+}
+
+function frSelectCycle(cycleId, scroll) {
+    frState.activeCycle = cycleId;
+    frHighlightCycle(cycleId);
+    frSyncActiveMarker();
+    const card = Array.from(document.querySelectorAll('#key-trade-list .ktl-card'))
+        .find((el) => el.dataset.cycle === String(cycleId));
+    if (card && scroll) {
+        card.classList.add('ktl-card-active');
+        card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+    document.querySelectorAll('#key-trade-list .ktl-card').forEach((el) => {
+        el.classList.toggle('ktl-card-active', el === card);
+    });
+}
+
+function frHighlightCycle(cycleId) {
+    const layer = document.getElementById('report-bar-highlight');
+    if (!layer || !reportPriceChart) return;
+    const times = [];
+    frCycleFills(cycleId).forEach((f) => {
+        const t = frState.baseTimeIndex && frState.baseTimeIndex.barTime
+            ? frState.baseTimeIndex.barTime[String(f.bar_id)]
+            : undefined;
+        if (t !== undefined) times.push(t);
+    });
+    layer.innerHTML = '';
+    const unique = Array.from(new Set(times));
+    if (!unique.length) {
+        layer.classList.add('hidden');
+        return;
+    }
+
+    // 如果周期 bar 当前不在可视区，自动把图表滚到该周期（离开卡片时恢复原区间）
+    const rows = (frState.report && frState.report.kline_series) || [];
+    if (!frState.hoverRangeApplied && rows.length) {
+        const visible = reportPriceChart.timeScale().getVisibleLogicalRange();
+        const width = document.getElementById('report-price-chart')?.clientWidth || 0;
+        const offscreen = unique.some((time) => {
+            const x = reportPriceChart.timeScale().timeToCoordinate(time);
+            return x === null || x === undefined || x < 0 || x > width;
+        });
+        if (offscreen && visible) {
+            const timeList = rows.map((r) => r.time);
+            const positions = unique.map((t) => timeList.indexOf(t)).filter((idx) => idx >= 0);
+            const firstIdx = positions.length ? Math.min(...positions) : 0;
+            const lastIdx = positions.length ? Math.max(...positions) : timeList.length - 1;
+            const fromIdx = Math.max(0, firstIdx - 8);
+            const toIdx = Math.min(timeList.length - 1, lastIdx + 8);
+            frState.hoverRestoreRange = visible;
+            frState.hoverRangeApplied = true;
+            try {
+                reportPriceChart.timeScale().setVisibleLogicalRange({
+                    from: fromIdx,
+                    to: toIdx,
+                });
+            } catch (e) {
+                return;
+            }
+            setTimeout(() => frHighlightCycle(cycleId), 30);
+            return;
+        }
+    }
+    unique.forEach((time) => {
+        let x;
+        try { x = reportPriceChart.timeScale().timeToCoordinate(time); } catch (e) { x = null; }
+        if (x === null || x === undefined || !isFinite(x)) return;
+        const bar = document.createElement('div');
+        bar.className = 'report-bar-highlight-bar';
+        bar.style.left = (x - 5) + 'px';
+        layer.appendChild(bar);
+    });
+    layer.classList.toggle('hidden', !layer.childElementCount);
+    frState.hoverCycle = cycleId;
+
+    const overlay = document.getElementById('fill-review-overlay');
+    if (overlay) {
+        overlay.querySelectorAll('.fr-cycle-band, .fr-key-marker').forEach((el) => {
+            el.classList.toggle('fr-cycle-active', el.dataset.cycle === cycleId);
+        });
+    }
+}
+
+function frClearCycleHighlight() {
+    frState.hoverCycle = null;
+    if (frState.hoverRangeApplied && frState.hoverRestoreRange && reportPriceChart) {
+        try {
+            reportPriceChart.timeScale().setVisibleLogicalRange(frState.hoverRestoreRange);
+        } catch (e) { /* 图表已销毁时忽略 */ }
+    }
+    frState.hoverRestoreRange = null;
+    frState.hoverRangeApplied = false;
+    const layer = document.getElementById('report-bar-highlight');
+    if (layer) {
+        layer.innerHTML = '';
+        layer.classList.add('hidden');
+    }
+    document.querySelectorAll('#fill-review-overlay .fr-cycle-band, #fill-review-overlay .fr-key-marker').forEach((el) => {
+        el.classList.remove('fr-cycle-active');
+    });
+    document.querySelectorAll('#key-trade-list .ktl-card').forEach((el) => el.classList.remove('ktl-card-active'));
 }
 
 function frScheduleRender() {
@@ -4823,6 +5118,7 @@ function frScheduleRender() {
     frFrame = requestAnimationFrame(() => {
         frFrame = 0;
         frRenderOverlay();
+        if (frState.hoverCycle) frHighlightCycle(frState.hoverCycle);
         if (frState.activeKey) frPositionCard();
     });
 }
@@ -4924,79 +5220,6 @@ function frOpenClusterCard(group, x, y) {
     frShowCard(`${head}<div class="fr-card-body fr-card-body-facts">${fills.map(frFactItem).join('')}${links}</div>`, x, y, group.key);
 }
 
-function frCloseKeyPanel() {
-    const panel = document.getElementById('key-trade-panel');
-    const body = document.getElementById('key-trade-body');
-    const label = document.getElementById('kt-cycle-label');
-    if (panel) panel.classList.add('hidden');
-    if (body) body.innerHTML = '';
-    if (label) label.textContent = '';
-    frState.activeCycle = null;
-    frSyncActiveMarker();
-}
-
-function frOpenKeyPanel(k) {
-    if (!k) return;
-    const panel = document.getElementById('key-trade-panel');
-    const body = document.getElementById('key-trade-body');
-    const label = document.getElementById('kt-cycle-label');
-    if (!panel || !body) return;
-    const cycleFills = frState.fills.filter((f) => f.trade_cycle_id === k.trade_cycle_id);
-    const first = cycleFills[0] || null;
-    const last = cycleFills.length ? cycleFills[cycleFills.length - 1] : null;
-    const closed = last && Number(last.position_after) === 0;
-    const period = first
-        ? `${first.date}${frBarTimeOf(first.bar_id) ? ' ' + frBarTimeOf(first.bar_id) : ''} → ${last ? last.date : ''}`
-        : '时间缺失';
-    const list = (v, emptyText) => (Array.isArray(v) && v.length
-        ? `<ul class="fr-bullets">${v.map((t) => `<li>${escapeHtml(t)}</li>`).join('')}</ul>`
-        : `<div class="fr-muted">${emptyText}</div>`);
-    const evid = (k.evidence_fill_ids || []).map((fid) => `<button type="button" class="fr-chip" data-act="focus" data-fill="${escapeHtml(fid)}">${escapeHtml(fid)}</button>`).join(' ');
-    const facts = cycleFills.map(frFactItem).join('');
-    if (label) {
-        label.textContent = `${k.trade_cycle_id} · ${cycleFills.length} 笔成交 · ${closed ? '已清仓' : '期末仍持仓'}`;
-    }
-    body.innerHTML = `
-        <div class="kt-overview">
-            <div class="kt-ov-item"><span>周期编号</span><b class="fr-mono">${escapeHtml(k.trade_cycle_id)}</b></div>
-            <div class="kt-ov-item"><span>首次建仓</span><b>${escapeHtml(first ? first.date : '—')}</b></div>
-            <div class="kt-ov-item"><span>最终清仓</span><b>${escapeHtml(closed && last ? last.date : '期末仍持仓')}</b></div>
-            <div class="kt-ov-item"><span>区间</span><b>${escapeHtml(period)}</b></div>
-            <div class="kt-ov-item"><span>标题</span><b>${escapeHtml(k.title || '—')}</b></div>
-        </div>
-        <div class="kt-section">
-            <div class="kt-section-title">全部相关成交 · 主要操作过程</div>
-            <div class="kt-fills">${facts || '<div class="fr-muted">该周期没有可用成交记录</div>'}</div>
-        </div>
-        <div class="kt-section">
-            <div class="kt-section-title">AI 总体评价</div>
-            <div class="kt-text">${escapeHtml(k.summary || '无')}</div>
-        </div>
-        <div class="kt-section">
-            <div class="kt-section-title">主要优点</div>${list(k.strengths, '无')}
-        </div>
-        <div class="kt-section">
-            <div class="kt-section-title">核心问题</div>${list(k.issues, '无')}
-        </div>
-        <div class="kt-section">
-            <div class="kt-section-title">经验总结</div>
-            <div class="kt-text">${escapeHtml(k.lesson || '无')}</div>
-        </div>
-        <div class="kt-section">
-            <div class="kt-section-title">后续改进建议</div>${list(k.next_rules, '无')}
-        </div>
-        <div class="kt-section">
-            <div class="kt-section-title">证据成交（点击定位到曲线上那一笔）</div>
-            <div class="fr-chips">${evid || '<span class="fr-muted">无</span>'}</div>
-        </div>`;
-    panel.classList.remove('hidden');
-    frState.activeCycle = k.trade_cycle_id;
-    frSyncActiveMarker();
-    if (typeof panel.scrollIntoView === 'function') {
-        panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-    }
-}
-
 function frFocusFill(fillId) {
     const cluster = frState.clusters.find((c) => c.fills.some((f) => f.fill_id === fillId));
     if (!cluster) {
@@ -5026,8 +5249,7 @@ function frBindCardEvents() {
         const action = act.dataset.act;
         if (action === 'close') frCloseCard();
         if (action === 'cycle') {
-            const k = frState.keys.find((x) => x.trade_cycle_id === act.dataset.cycle);
-            if (k) frOpenKeyPanel(k);
+            frSelectCycle(act.dataset.cycle, true);
         }
         if (action === 'focus') frFocusFill(act.dataset.fill);
     });
@@ -5050,19 +5272,8 @@ function frBindGlobalEvents() {
             frCloseCard();
             return;
         }
-        const panel = document.getElementById('key-trade-panel');
-        if (panel && !panel.classList.contains('hidden')) frCloseKeyPanel();
+        frClearCycleHighlight();
     });
-    document.getElementById('kt-close')?.addEventListener('click', frCloseKeyPanel);
-    const panel = document.getElementById('key-trade-panel');
-    if (panel && !panel.dataset.bound) {
-        panel.dataset.bound = '1';
-        panel.addEventListener('click', (ev) => {
-            const act = ev.target.closest('[data-act]');
-            if (!act) return;
-            if (act.dataset.act === 'focus') frFocusFill(act.dataset.fill);
-        });
-    }
 }
 function showReport(report) {
     // 保存当前报告数据供 AI 分析使用
@@ -5510,6 +5721,45 @@ function resetCoachChat(closePanel = false) {
     if (closePanel) {
         document.getElementById('ai-coach-panel')?.classList.add('hidden');
     }
+}
+
+function setupCoachDrag() {
+    const panel = document.getElementById('ai-coach-panel');
+    const handle = panel && panel.querySelector('.ai-coach-head');
+    if (!panel || !handle || panel.dataset.dragBound) return;
+    panel.dataset.dragBound = '1';
+
+    handle.addEventListener('mousedown', (event) => {
+        if (event.target.closest('button, textarea, input')) return;
+        const rect = panel.getBoundingClientRect();
+        panel.style.left = rect.left + 'px';
+        panel.style.top = rect.top + 'px';
+        panel.style.right = 'auto';
+        panel.style.bottom = 'auto';
+
+        const startX = event.clientX;
+        const startY = event.clientY;
+        const originX = rect.left;
+        const originY = rect.top;
+        document.body.style.userSelect = 'none';
+
+        const move = (ev) => {
+            const maxX = Math.max(0, window.innerWidth - panel.offsetWidth);
+            const maxY = Math.max(0, window.innerHeight - panel.offsetHeight);
+            const left = Math.min(Math.max(0, originX + ev.clientX - startX), maxX);
+            const top = Math.min(Math.max(0, originY + ev.clientY - startY), maxY);
+            panel.style.left = left + 'px';
+            panel.style.top = top + 'px';
+        };
+        const up = () => {
+            document.removeEventListener('mousemove', move);
+            document.removeEventListener('mouseup', up);
+            document.body.style.userSelect = '';
+        };
+        document.addEventListener('mousemove', move);
+        document.addEventListener('mouseup', up);
+        event.preventDefault();
+    });
 }
 
 function toggleCoachPanel(forceVisible) {
