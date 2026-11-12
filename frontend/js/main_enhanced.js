@@ -698,6 +698,17 @@ function setupEventListeners() {
         const box = document.getElementById('ai-review-prompt');
         if (box) box.value = defaultAiReviewPrompt || '';
     });
+    document.getElementById('trading-rules-example-btn')?.addEventListener('click', () => {
+        const box = document.getElementById('trading-rules');
+        if (box && !box.value.trim()) {
+            box.value = [
+                '单只股票仓位不超过总资金的 30%',
+                '亏损时不加仓摊低成本',
+                '跌破持仓成本 8% 必须止损',
+                '清仓后 3 根 K 线内不重新买入'
+            ].join('\n');
+        }
+    });
     document.getElementById('ai-config-test-btn')?.addEventListener('click', testAIConfig);
     document.getElementById('ai-config-clear-btn')?.addEventListener('click', clearAIConfig);
     document.getElementById('cancel-settings-btn')?.addEventListener('click', hideSettings);
@@ -816,6 +827,9 @@ function setupEventListeners() {
         document.getElementById('review-history-modal')?.classList.add('hidden');
     });
     document.getElementById('rh-refresh-btn')?.addEventListener('click', loadReviewHistory);
+    document.querySelectorAll('.rh-tab').forEach(btn => {
+        btn.addEventListener('click', () => switchRhTab(btn.dataset.rhTab));
+    });
     document.getElementById('rh-export-btn')?.addEventListener('click', exportReviewHistory);
     document.getElementById('rh-backup-btn')?.addEventListener('click', backupReviewHistory);
     document.getElementById('rh-restore-btn')?.addEventListener('click', restoreReviewHistory);
@@ -1329,6 +1343,7 @@ function renderAICommentarySection(commentary, cached = false) {
         </div>
     `;
     document.getElementById('regenerate-ai-btn')?.addEventListener('click', () => requestAIAnalysis(true));
+    if (typeof frRenderRuleCheck === 'function') frRenderRuleCheck();
     aiSection.scrollIntoView({ behavior: 'smooth', block: 'center' });
 }
 
@@ -2007,6 +2022,12 @@ async function loadUserSettings() {
         // 加载 AI 接口配置（base_url / model / Key 掩码）
         await loadAIConfigEditor();
 
+        // 加载交易规则（每行一条）
+        const rulesBox = document.getElementById('trading-rules');
+        if (rulesBox) {
+            rulesBox.value = (Array.isArray(settings.trading_rules) ? settings.trading_rules : []).join('\n');
+        }
+
         // 加载MA周期
         if (settings.ma_periods && Array.isArray(settings.ma_periods)) {
             maPeriods = [...settings.ma_periods];
@@ -2077,6 +2098,8 @@ async function saveSettings() {
             enable_ai_api: document.getElementById('enable-ai-api').checked,
             cooldown_bars_after_flat: Math.max(0, parseInt(document.getElementById('cooldown-bars-after-flat').value, 10) || 0),
             ai_review_prompt: (document.getElementById('ai-review-prompt')?.value || '').trim(),
+            trading_rules: (document.getElementById('trading-rules')?.value || '')
+                .split('\n').map(s => s.trim()).filter(Boolean).slice(0, 20),
             stop_loss_percent: getGuidePercent('stop-loss-percent', 10),
             take_profit_percent: getGuidePercent('take-profit-percent', 20),
             ma_periods: maPeriods,
@@ -4448,6 +4471,8 @@ let frState = {
     sessionId: '',
     fills: [],
     keys: [],
+    ruleCheck: [],
+    rulesConfigured: 0,
     clusters: [],
     available: false,
     hasAi: false,
@@ -4506,6 +4531,8 @@ function frReset(report) {
     frState.sessionId = frSessionIdOf(report || {});
     frState.fills = [];
     frState.keys = [];
+    frState.ruleCheck = [];
+    frState.rulesConfigured = 0;
     frState.clusters = [];
     frState.available = false;
     frState.hasAi = false;
@@ -4519,6 +4546,7 @@ function frReset(report) {
     frCloseKeyPanel();
     const overlay = document.getElementById('fill-review-overlay');
     if (overlay) overlay.innerHTML = '';
+    document.querySelector('.rule-check-section')?.remove();
     frSetNotice('');
     document.getElementById('fill-review-panel')?.classList.add('hidden');
 }
@@ -4556,6 +4584,8 @@ async function loadFillReviewsForReport(report) {
 
         frState.fills = (data.fills || []).map((f) => ({ ...f, side: String(f.side || '').toLowerCase() }));
         frState.keys = data.key_trade_reviews || [];
+        frState.ruleCheck = data.rule_check || [];
+        frState.rulesConfigured = data.rules_configured || 0;
         frState.available = !!data.available;
         frState.hasAi = !!data.has_ai_analysis;
         frState.coverage = data.coverage || null;
@@ -4567,6 +4597,7 @@ async function loadFillReviewsForReport(report) {
 
         document.getElementById('fill-review-panel')?.classList.remove('hidden');
         frRenderOverlay();
+        frRenderRuleCheck();
         frUpdateNotice();
     } catch (e) {
         if (token !== frState.token) return;
@@ -4574,6 +4605,64 @@ async function loadFillReviewsForReport(report) {
     } finally {
         if (token === frState.token) frState.loading = false;
     }
+}
+
+function frRuleVerdictMeta(verdict) {
+    const map = {
+        COMPLIED: ['遵守', 'ok'],
+        VIOLATED: ['违反', 'bad'],
+        INSUFFICIENT_DATA: ['无法判断', 'warn'],
+        NOT_APPLICABLE: ['本轮未涉及', 'muted']
+    };
+    return map[String(verdict || '')] || ['无法判断', 'warn'];
+}
+
+function frRenderRuleCheck() {
+    const reportContent = document.getElementById('report-content');
+    if (!reportContent) return;
+    const checks = frState.ruleCheck || [];
+    if (!checks.length && !frState.rulesConfigured) return;
+    document.querySelector('.rule-check-section')?.remove();
+
+    const section = document.createElement('div');
+    section.className = 'rule-check-section';
+    if (!checks.length) {
+        section.innerHTML = `
+            <h3>规则一致性对照</h3>
+            <div class="ri-empty-hint">已配置 ${frState.rulesConfigured} 条交易规则，但本轮 AI 复盘没有返回对照结果。重新生成一次复盘即可让模型逐条检查。</div>`;
+    } else {
+        const violated = checks.filter(c => c.verdict === 'VIOLATED').length;
+        section.innerHTML = `
+            <h3>规则一致性对照 <span class="ri-check-sum">${checks.length} 条规则｜违反 ${violated} 条</span></h3>
+            <p class="ri-check-note">只检查是否遵守你自己设定的规则，不按盈亏或事后走势给规则排名。</p>
+            <div class="ri-check-list">${checks.map(c => {
+                const [label, tone] = frRuleVerdictMeta(c.verdict);
+                const evidence = (c.evidence_fill_ids || []).map(fid => `<button type="button" class="fr-chip" data-rule-fill="${escapeHtml(fid)}">${escapeHtml(fid)}</button>`).join(' ');
+                return `
+                    <div class="ri-check-row">
+                        <div class="ri-check-head">
+                            <span class="rh-id">${escapeHtml(c.rule_id || '')}</span>
+                            <span class="ri-check-rule">${escapeHtml(c.rule || '')}</span>
+                            <span class="ri-verdict ri-verdict-${tone}">${label}</span>
+                        </div>
+                        <div class="ri-check-detail">${escapeHtml(c.detail || '无说明')}</div>
+                        ${evidence ? `<div class="fr-chips">${evidence}</div>` : ''}
+                    </div>`;
+            }).join('')}</div>`;
+    }
+
+    const aiSection = document.querySelector('.ai-commentary-section');
+    const detailsSection = document.querySelector('.trade-details-section');
+    if (aiSection && aiSection.parentNode === reportContent) {
+        aiSection.insertAdjacentElement('afterend', section);
+    } else if (detailsSection) {
+        reportContent.insertBefore(section, detailsSection);
+    } else {
+        reportContent.appendChild(section);
+    }
+    section.querySelectorAll('[data-rule-fill]').forEach(btn => {
+        btn.addEventListener('click', () => frFocusFill(btn.dataset.ruleFill));
+    });
 }
 
 function frUpdateNotice() {
@@ -5116,8 +5205,124 @@ function rhFetch(path, options) {
 async function openReviewHistory() {
     document.getElementById('review-history-modal')?.classList.remove('hidden');
     document.getElementById('rh-detail')?.classList.add('hidden');
+    switchRhTab('overview');
     await loadReviewHistory();
+    await loadReviewInsights();
     await loadReviewBackups();
+}
+
+function switchRhTab(tab) {
+    document.querySelectorAll('.rh-tab').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.rhTab === tab);
+    });
+    document.getElementById('rh-overview')?.classList.toggle('hidden', tab !== 'overview');
+    document.getElementById('rh-issues-panel')?.classList.toggle('hidden', tab !== 'issues');
+}
+
+let rhInsightsReady = false;
+
+async function loadReviewInsights() {
+    const profileBox = document.getElementById('ri-profile');
+    if (profileBox && !rhInsightsReady) profileBox.innerHTML = '<div class="rh-meta">正在汇总训练画像…</div>';
+    try {
+        const res = await rhFetch('/review-insights');
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'HTTP ' + res.status);
+        rhInsightsReady = true;
+        renderReviewProfile(data.profile || {});
+        renderReviewNotebook(data.notebook || {});
+        renderReviewRules(data.rules || {});
+    } catch (e) {
+        console.error('读取能力画像失败:', e);
+        if (profileBox) profileBox.innerHTML = `<div class="rh-meta">画像读取失败：${escapeHtml(e.message)}</div>`;
+    }
+}
+
+function renderReviewProfile(profile) {
+    const box = document.getElementById('ri-profile');
+    if (!box) return;
+    const cards = [
+        ['已复盘训练', profile.sessions || 0, '轮'],
+        ['平均收益率', `${Number(profile.avg_return || 0).toFixed(2)}%`, ''],
+        ['局胜率', `${Number(profile.session_win_rate || 0).toFixed(1)}%`, ''],
+        ['平均最大回撤', `${Number(profile.avg_max_drawdown || 0).toFixed(2)}%`, ''],
+        ['平均交易胜率', `${Number(profile.avg_trade_win_rate || 0).toFixed(1)}%`, ''],
+        ['最好 / 最差', `${Number(profile.best_return || 0).toFixed(1)}% / ${Number(profile.worst_return || 0).toFixed(1)}%`, '']
+    ];
+    box.innerHTML = `<div class="ri-profile-title">能力画像</div><div class="ri-profile-grid">` +
+        cards.map(([label, value, unit]) => `
+            <div class="ri-card"><span class="ri-card-value">${escapeHtml(String(value))}<small>${escapeHtml(unit)}</small></span><span class="ri-card-label">${escapeHtml(label)}</span></div>
+        `).join('') + '</div>' +
+        '<p class="rh-meta">口径：只统计已保存报告的完整训练；收益与回撤取训练结果，不做收益排名。纪律执行看下面的规则对照。</p>';
+}
+
+function renderReviewNotebook(notebook) {
+    const box = document.getElementById('ri-notebook');
+    if (!box) return;
+    const cats = notebook.categories || [];
+    if (!cats.length) {
+        box.innerHTML = '<div class="rh-empty">还没有错题。完成一轮 AI 复盘后，问题会按分类自动聚合到这里。</div>';
+        return;
+    }
+    box.innerHTML = cats.map(c => {
+        const issues = (c.issues || []).map(i => `
+            <div class="ri-nb-issue">
+                <span class="rh-id">${escapeHtml(i.issue_id)}</span>
+                <span class="ri-nb-title">${escapeHtml(i.title)}</span>
+                <span class="rh-chip rh-user">${escapeHtml(i.status_user || '')}</span>
+                <span class="ri-nb-count">×${i.occurrence_count || 0}</span>
+            </div>`).join('');
+        return `
+            <div class="ri-nb-card">
+                <div class="ri-nb-head">
+                    <span class="ri-nb-cat">${escapeHtml(c.category)}</span>
+                    <span class="ri-nb-sum">未解决 ${c.open_count || 0}｜共 ${c.issue_count || 0} 条｜出现 ${c.occurrences || 0} 次${c.recurring ? `｜再次出现 ${c.recurring}` : ''}</span>
+                </div>
+                ${issues || '<div class="rh-meta">没有明细</div>'}
+            </div>`;
+    }).join('');
+}
+
+function renderReviewRules(rules) {
+    const box = document.getElementById('ri-rules');
+    const violationBox = document.getElementById('ri-violations');
+    if (!box || !violationBox) return;
+    const items = rules.items || [];
+    const stats = rules.stats || {};
+    if (!items.length) {
+        box.innerHTML = '<div class="rh-empty">还没有设置交易规则。到「设置 → 交易规则」写几条你自己的纪律，下一轮复盘会逐条对照。</div>';
+    } else {
+        const rate = stats.compliance_rate === null || stats.compliance_rate === undefined
+            ? '—' : `${stats.compliance_rate}%`;
+        box.innerHTML = `
+            <div class="ri-rule-summary">
+                <span>已配置 <b>${items.length}</b> 条规则</span>
+                <span>已对照 <b>${stats.checks || 0}</b> 次（${stats.reports_with_checks || 0} 份复盘）</span>
+                <span>遵守率 <b>${escapeHtml(String(rate))}</b></span>
+                <span class="ri-rule-violated">违反 ${stats.violated || 0} 次</span>
+                <span>无法判断 ${stats.insufficient || 0} 次</span>
+            </div>
+            <div class="ri-rule-list">${items.map((rule, idx) => {
+                const row = (stats.by_rule || []).find(r => r.rule_id === `R${idx + 1}` && r.rule === rule) || {};
+                const counts = row.checks
+                    ? `遵守 ${row.complied || 0}｜违反 ${row.violated || 0}｜无法判断 ${row.insufficient || 0}`
+                    : '尚未对照';
+                return `<div class="ri-rule-row"><span class="rh-id">R${idx + 1}</span><span class="ri-rule-text">${escapeHtml(rule)}</span><span class="ri-rule-count">${counts}</span></div>`;
+            }).join('')}</div>`;
+    }
+    const violations = stats.violations || [];
+    if (!violations.length) {
+        violationBox.innerHTML = items.length
+            ? '<div class="rh-meta">最近 60 份复盘里没有记录到违反规则的行为（或者还没有带规则跑过 AI 复盘）。</div>'
+            : '';
+        return;
+    }
+    violationBox.innerHTML = `<div class="ri-violation-title">最近的规则违规</div>` + violations.map(v => `
+        <div class="ri-violation">
+            <div class="ri-violation-head"><span class="rh-id">${escapeHtml(v.rule_id || '')}</span><span>${escapeHtml(v.rule || '')}</span></div>
+            <div class="ri-violation-detail">${escapeHtml(v.detail || '')}</div>
+            <div class="rh-meta">复盘 ${escapeHtml(v.session_id || '—')}｜证据 ${escapeHtml((v.evidence_fill_ids || []).join('、') || '无')}</div>
+        </div>`).join('');
 }
 
 async function loadReviewHistory() {

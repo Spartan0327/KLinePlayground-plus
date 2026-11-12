@@ -182,6 +182,16 @@
                     <p class="field-hint">这段文字会拼在训练数据（基本信息 / 交易明细 / 纪律检查 / 净值曲线特征）之后一起发给模型。留空就退回内置模板。也可以直接用接口改：<code>GET /api/users/&lt;用户名&gt;/ai-review-prompt</code> 读取，<code>PUT</code> 同一地址保存（body 为 <code>{"prompt": "..."}</code>）。</p>
                 </div>
 
+                <div class="settings-section">
+                    <label class="section-title">交易规则（每行一条 · AI 复盘时逐条对照纪律）</label>
+                    <textarea id="trading-rules" rows="6" spellcheck="false"
+                              placeholder="例如：&#10;单只股票仓位不超过总资金的 30%&#10;亏损不加仓&#10;跌破成本 8% 必须止损&#10;清仓后 3 根 K 线内不重新买入"></textarea>
+                    <div class="ai-prompt-actions">
+                        <button type="button" id="trading-rules-example-btn" class="btn btn-secondary">载入示例</button>
+                    </div>
+                    <p class="field-hint">每行一条，最多 20 条、每条 160 字。复盘时这些规则会原样发给 AI，只检查本轮成交是否遵守规则，不按盈亏给规则排名，也不做事后走势反推。留空 = 本轮没有可对照的规则。</p>
+                </div>
+
                 <div class="form-group">
                     <label>清仓后禁买期（交易日，0 = 关闭）</label>
                     <input type="number" id="cooldown-bars-after-flat" step="1" min="0" max="20" value="3">
@@ -252,6 +262,26 @@
                     <button id="rh-close-btn" class="btn btn-secondary">关闭</button>
                 </div>
 
+                <div class="rh-tabs">
+                    <button type="button" class="rh-tab active" data-rh-tab="overview">能力画像 / 错题本</button>
+                    <button type="button" class="rh-tab" data-rh-tab="issues">问题档案</button>
+                </div>
+
+                <div id="rh-overview" class="rh-overview">
+                    <div id="ri-profile" class="ri-profile"></div>
+                    <div class="ri-section">
+                        <h3>错题本（按问题分类聚合）</h3>
+                        <p class="rh-meta">同一类问题合并展示，按未解决数量与出现次数排序；点「问题档案」可以看单条证据。</p>
+                        <div id="ri-notebook"></div>
+                    </div>
+                    <div class="ri-section">
+                        <h3>规则一致性对照</h3>
+                        <div id="ri-rules"></div>
+                        <div id="ri-violations"></div>
+                    </div>
+                </div>
+
+                <div id="rh-issues-panel" class="hidden">
                 <div class="rh-stats" id="rh-stats"></div>
 
                 <div class="rh-toolbar">
@@ -327,6 +357,7 @@
                     <div id="rh-observations" class="rh-table-wrap"></div>
                     <h4>版本记录</h4>
                     <div id="rh-versions" class="rh-table-wrap"></div>
+                </div>
                 </div>
             </div>
         </div>

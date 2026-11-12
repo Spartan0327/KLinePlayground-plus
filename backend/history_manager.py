@@ -449,6 +449,42 @@ class HistoryManager:
             print(f"获取训练历史失败: {e}")
             return []
     
+    def get_recent_review_meta(self, username: str, limit: int = 50) -> List[Dict]:
+        """读取最近若干次复盘的 review_meta（能力画像/规则违规聚合用）"""
+        try:
+            db_path = self._get_user_db_path(username)
+            if not os.path.exists(db_path):
+                return []
+            self._init_user_history_db(username)
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT session_id, review_meta_json, updated_at
+                FROM session_reports
+                WHERE review_meta_json IS NOT NULL
+                ORDER BY updated_at DESC
+                LIMIT ?
+            ''', (max(1, int(limit)),))
+            rows = cursor.fetchall()
+            conn.close()
+            out = []
+            for session_id, meta_json, updated_at in rows:
+                try:
+                    meta = json.loads(meta_json)
+                except Exception:
+                    continue
+                if not isinstance(meta, dict):
+                    continue
+                out.append({
+                    'session_id': session_id,
+                    'updated_at': updated_at,
+                    'review_meta': meta,
+                })
+            return out
+        except Exception as e:
+            print(f"获取复盘元数据失败: {e}")
+            return []
+
     def get_session_detail(self, username: str, session_id: str) -> Optional[Dict]:
         """获取训练会话详情"""
         try:

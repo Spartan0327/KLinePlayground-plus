@@ -146,6 +146,10 @@ class UserManagerEnhanced:
     def get_training_history(self, username: str, limit: int = 20) -> List[Dict]:
         """获取训练历史"""
         return self.history_manager.get_training_history(username, limit)
+
+    def get_recent_review_meta(self, username: str, limit: int = 50) -> List[Dict]:
+        """获取最近复盘的 review_meta"""
+        return self.history_manager.get_recent_review_meta(username, limit)
     
     def get_session_detail(self, username: str, session_id: str) -> Optional[Dict]:
         """获取训练会话详情"""

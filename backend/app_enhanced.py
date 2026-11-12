@@ -267,6 +267,141 @@ def list_review_history(username):
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/users/<username>/review-insights', methods=['GET'])
+def review_insights(username):
+    """能力画像 + 错题本：训练结果统计、历史问题分类聚合、规则对照违规汇总"""
+    try:
+        if not user_manager.get_user_config(username):
+            return jsonify({'error': '用户不存在'}), 404
+
+        history = user_manager.get_training_history(username, limit=200) or []
+        finished = [h for h in history if h.get('has_report') or h.get('status') == 'completed']
+
+        def _f(value, default=0.0):
+            try:
+                return float(value)
+            except Exception:
+                return default
+
+        returns = [_f(h.get('total_return')) for h in finished if h.get('total_return') is not None]
+        drawdowns = [_f(h.get('max_drawdown')) for h in finished if h.get('max_drawdown') is not None]
+        trade_rates = [_f(h.get('trade_win_rate')) for h in finished if h.get('trade_win_rate') is not None]
+        wins = sum(1 for r in returns if r > 0)
+        profile = {
+            'sessions': len(finished),
+            'avg_return': round(sum(returns) / len(returns), 2) if returns else 0,
+            'best_return': round(max(returns), 2) if returns else 0,
+            'worst_return': round(min(returns), 2) if returns else 0,
+            'win_sessions': wins,
+            'session_win_rate': round(wins * 100 / len(returns), 1) if returns else 0,
+            'avg_max_drawdown': round(sum(drawdowns) / len(drawdowns), 2) if drawdowns else 0,
+            'avg_trade_win_rate': round(sum(trade_rates) / len(trade_rates), 1) if trade_rates else 0,
+        }
+
+        archive = review_history.load(user_manager.users_dir, username)
+        issues = archive.get('issues') or []
+        categories = {}
+        active_status = ('待改进', '持续观察', '已改善')
+        for issue in issues:
+            cat = str(issue.get('category') or '其他')
+            bucket = categories.setdefault(cat, {
+                'category': cat, 'issue_count': 0, 'occurrences': 0, 'recurring': 0,
+                'open_count': 0, 'resolved': 0, 'latest_seen': '', 'issues': [],
+            })
+            bucket['issue_count'] += 1
+            bucket['occurrences'] += int(issue.get('occurrence_count') or 0)
+            if issue.get('status_ai') == 'RECURRED':
+                bucket['recurring'] += 1
+            if issue.get('status_user') in active_status:
+                bucket['open_count'] += 1
+            if issue.get('status_user') == '已解决':
+                bucket['resolved'] += 1
+            last_seen = str(issue.get('last_seen') or '')
+            if last_seen > bucket['latest_seen']:
+                bucket['latest_seen'] = last_seen
+            bucket['issues'].append({
+                'issue_id': issue.get('issue_id'),
+                'title': issue.get('title'),
+                'severity': issue.get('severity'),
+                'status_user': issue.get('status_user'),
+                'status_ai': issue.get('status_ai'),
+                'occurrence_count': int(issue.get('occurrence_count') or 0),
+                'last_seen': last_seen,
+                'recommended_rule': issue.get('recommended_rule') or '',
+            })
+        notebooks = []
+        for bucket in categories.values():
+            bucket['issues'] = sorted(
+                bucket['issues'], key=lambda i: (-i['occurrence_count'], str(i.get('last_seen') or '')),
+            )[:3]
+            notebooks.append(bucket)
+        notebooks.sort(key=lambda b: (-b['open_count'], -b['occurrences'], b['category']))
+
+        rules = _user_trading_rules(username)
+        rule_stats = {
+            'configured': len(rules),
+            'checks': 0, 'complied': 0, 'violated': 0, 'insufficient': 0, 'not_applicable': 0,
+            'reports_with_checks': 0, 'compliance_rate': None, 'violations': [], 'by_rule': [],
+        }
+        per_rule = {}
+        metas = user_manager.get_recent_review_meta(username, limit=60) or []
+        for item in metas:
+            meta = item.get('review_meta') or {}
+            checks = meta.get('rule_check') or []
+            if not checks:
+                continue
+            rule_stats['reports_with_checks'] += 1
+            for check in checks:
+                verdict = str(check.get('verdict') or 'INSUFFICIENT_DATA')
+                rule_stats['checks'] += 1
+                if verdict == 'COMPLIED':
+                    rule_stats['complied'] += 1
+                elif verdict == 'VIOLATED':
+                    rule_stats['violated'] += 1
+                    if len(rule_stats['violations']) < 12:
+                        rule_stats['violations'].append({
+                            'session_id': item.get('session_id'),
+                            'updated_at': item.get('updated_at'),
+                            'rule_id': check.get('rule_id'),
+                            'rule': check.get('rule'),
+                            'detail': check.get('detail'),
+                            'evidence_fill_ids': check.get('evidence_fill_ids') or [],
+                        })
+                elif verdict == 'NOT_APPLICABLE':
+                    rule_stats['not_applicable'] += 1
+                else:
+                    rule_stats['insufficient'] += 1
+                key = str(check.get('rule_id') or '')
+                row = per_rule.setdefault(key, {
+                    'rule_id': key, 'rule': check.get('rule'), 'checks': 0,
+                    'complied': 0, 'violated': 0, 'insufficient': 0, 'not_applicable': 0,
+                })
+                row['checks'] += 1
+                if verdict == 'COMPLIED':
+                    row['complied'] += 1
+                elif verdict == 'VIOLATED':
+                    row['violated'] += 1
+                elif verdict == 'NOT_APPLICABLE':
+                    row['not_applicable'] += 1
+                else:
+                    row['insufficient'] += 1
+        decided = rule_stats['complied'] + rule_stats['violated']
+        if decided:
+            rule_stats['compliance_rate'] = round(rule_stats['complied'] * 100 / decided, 1)
+        rule_stats['by_rule'] = sorted(per_rule.values(), key=lambda r: (-r['violated'], -r['checks']))
+
+        return jsonify({
+            'profile': profile,
+            'notebook': {
+                'total_issues': len(issues),
+                'categories': notebooks,
+            },
+            'rules': {'items': rules, 'stats': rule_stats},
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/users/<username>/review-history/export', methods=['GET'])
 def export_review_history(username):
     """导出 Markdown（阅读/交接用，JSON 仍是权威数据）"""
@@ -555,6 +690,11 @@ DEFAULT_AI_REVIEW_PROMPT = """A股 K线交易训练复盘专家 MASTER PROMPT V2
 六、第四部分：交易纪律
 严格使用【纪律检查】的结论。有违规：指出日期、Bar ID 和违反的具体规则；无违规：明确写「未发现违规」；无法判断：说明缺什么数据。
 不得在没有盘中 K 线数据时判断止损或止盈已经触发。没违规不等于交易质量优秀。
+另外逐条对照【用户交易规则】：只判断本轮成交是否遵守这条用户自定规则，不评价这条规则本身是否赚钱，也不做收益排名。
+1. 每条规则只能给出「遵守 / 违反 / 无法判断 / 本轮未涉及」四种结论。
+2. 判「违反」必须给出具体成交证据（日期 + Bar + fill_id）；没有证据就只能写「无法判断」。
+3. 用户没有设置规则时，明确写「本轮没有可对照的交易规则」，不得临时发明规则，也不得用事后走势反推违规。
+4. 规则对照只谈纪律执行，不得因为某一笔卖出之后涨了或跌了就改变结论。
 
 七、第五部分：改进建议（最多 3 条）
 每条包含：要改善的问题、历史交易证据、可直接执行的规则、可量化验证指标、可能副作用。
@@ -652,6 +792,14 @@ B. 收益表现（100 分）：净收益表现 25、最大回撤控制 25、盈�
       "validation_metric": "如何验证",
       "rationale": "判断依据"
     }
+  ],
+  "rule_check": [
+    {
+      "rule_id": "R1",
+      "verdict": "COMPLIED",
+      "detail": "依据当时的仓位与止损线，本次清仓符合该条规则",
+      "evidence_fill_ids": ["F003", "F004"]
+    }
   ]
 }
 <<<END_TRADE_REVIEW_HISTORY_JSON>>>
@@ -671,6 +819,9 @@ B. 收益表现（100 分）：净收益表现 25、最大回撤控制 25、盈�
 11. evidence_fill_ids 必须来自本轮真实成交（F001 形式），不得虚构；每笔重点交易尽量给 2—6 个关键证据成交，周期本身只有 1 笔时给 1 个。
 12. 只写达到深评标准的周期；没有就输出空数组。不得为了凑满 3 笔把普通交易写成重点交易。
 13. next_rules 给 1—3 条可执行、可量化验证的改进建议；没有就给空数组。
+14. rule_check 必须逐条覆盖【用户交易规则】中的每条规则：rule_id 用 R1、R2…；verdict 只能是 COMPLIED、VIOLATED、INSUFFICIENT_DATA、NOT_APPLICABLE。
+15. 判 VIOLATED 必须给出至少一个真实 evidence_fill_ids；证据不存在或不足时改判 INSUFFICIENT_DATA。
+16. 没有配置用户规则时 rule_check 输出空数组，不要用默认规则代替用户规则。
 
 现在开始读取数据并完成复盘。
 """
@@ -712,6 +863,62 @@ def get_ai_review_prompt(username=None):
         except Exception:
             custom = ''
     return str(custom), DEFAULT_AI_REVIEW_PROMPT
+
+
+TRADING_RULES_MAX = 20
+TRADING_RULE_MAX_LEN = 160
+RULE_VERDICTS = ('COMPLIED', 'VIOLATED', 'INSUFFICIENT_DATA', 'NOT_APPLICABLE')
+RULE_VERDICT_LABELS = {
+    'COMPLIED': '遵守',
+    'VIOLATED': '违反',
+    'INSUFFICIENT_DATA': '无法判断',
+    'NOT_APPLICABLE': '本轮未涉及',
+}
+
+
+def normalize_trading_rules(value):
+    """把设置里的规则（数组或按行文本）整理成干净的规则列表"""
+    if isinstance(value, (list, tuple)):
+        raw_items = list(value)
+    else:
+        raw_items = str(value or '').splitlines()
+    rules = []
+    for item in raw_items:
+        text = str(item or '').strip()
+        for prefix in ('- ', '* ', '• ', '· '):
+            if text.startswith(prefix):
+                text = text[len(prefix):].strip()
+                break
+        text = text[:TRADING_RULE_MAX_LEN]
+        if not text or text in rules:
+            continue
+        rules.append(text)
+        if len(rules) >= TRADING_RULES_MAX:
+            break
+    return rules
+
+
+def _user_trading_rules(username=None):
+    """读取用户自定的交易规则（纪律一致性对照的基准）"""
+    if not username:
+        return []
+    try:
+        settings = (user_manager.get_user_config(username) or {}).get('settings') or {}
+        return normalize_trading_rules(settings.get('trading_rules'))
+    except Exception:
+        return []
+
+
+def build_user_rules_context(username=None) -> str:
+    """把用户规则编号后交给模型，规则编号必须稳定可引用"""
+    rules = _user_trading_rules(username)
+    if not rules:
+        return ('- 用户尚未设置交易规则。本轮只能提示「缺少可执行的规则」，'
+                '不得用事后走势反推违规，也不得凭空发明规则。')
+    lines = [f"- 共 {len(rules)} 条规则，规则编号仅供本轮 JSON 对照引用："]
+    for idx, rule in enumerate(rules, start=1):
+        lines.append(f"- R{idx}｜{rule}")
+    return '\n'.join(lines)
 
 
 def _review_settings(username=None) -> Dict:
@@ -896,13 +1103,68 @@ def merge_review_history(username, payload, review_id='') -> str:
 KEY_TRADE_MAX = 3
 
 
-def validate_key_trade_reviews(report, payload) -> Dict:
-    """V2.3：只校验重点交易深度点评，逐笔短评不再生成。
+def _normalize_rule_check(payload, rules, by_id, errors):
+    """校验 AI 返回的用户规则对照；规则编号必须对应本轮实际配置"""
+    if not rules:
+        if isinstance(payload, dict) and payload.get('rule_check') not in (None, []):
+            errors.append('本轮没有配置用户规则，rule_check 已忽略')
+        return []
+    raw = payload.get('rule_check') if isinstance(payload, dict) else None
+    if not isinstance(raw, list):
+        if raw is not None:
+            errors.append('rule_check 不是数组，已忽略')
+        return []
+    known = {f'R{i}': rule for i, rule in enumerate(rules, start=1)}
+    out = []
+    seen = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        rid = str(item.get('rule_id') or '').strip().upper()
+        if rid not in known:
+            errors.append(f'规则对照引用了不存在的规则编号：{rid or "(空)"}')
+            continue
+        if rid in seen:
+            errors.append(f'规则 {rid} 重复对照，只保留第一条')
+            continue
+        verdict = str(item.get('verdict') or '').strip().upper()
+        if verdict not in RULE_VERDICTS:
+            errors.append(f'规则 {rid} 的 verdict 非法：{verdict or "(空)"}')
+            continue
+        evid = []
+        if isinstance(item.get('evidence_fill_ids'), list):
+            for fid in item['evidence_fill_ids']:
+                fid = str(fid).strip()
+                if fid in by_id:
+                    evid.append(fid)
+                else:
+                    errors.append(f'规则 {rid} 的证据成交 {fid or "(空)"} 不存在，已剔除')
+        if verdict == 'VIOLATED' and not evid:
+            errors.append(f'规则 {rid} 判为违反但缺少有效证据成交，已降级为无法判断')
+            verdict = 'INSUFFICIENT_DATA'
+        seen.add(rid)
+        out.append({
+            'rule_id': rid,
+            'rule': known[rid],
+            'verdict': verdict,
+            'detail': str(item.get('detail') or '').strip()[:240],
+            'evidence_fill_ids': evid,
+        })
+    missing = [rid for rid in known if rid not in seen]
+    if missing:
+        errors.append('规则对照缺少：' + '、'.join(missing[:5]))
+    return out
+
+
+def validate_key_trade_reviews(report, payload, rules=None) -> Dict:
+    """V2.3：只校验重点交易深度点评与用户规则对照，逐笔短评不再生成。
 
     fill_reviews 恒返回空数组（数据库里的旧逐笔点评继续保留，只是新报告不再产生）；
-    key_trade_reviews 校验周期真实、证据成交真实、最多 KEY_TRADE_MAX 笔。
+    key_trade_reviews 校验周期真实、证据成交真实、最多 KEY_TRADE_MAX 笔；
+    rule_check 校验规则编号、结论与证据成交，最多覆盖本轮配置的规则条数。
     coverage 只披露本轮送模型的成交数、被 150 笔上限截掉的笔数与真实周期数。
     """
+    rules = normalize_trading_rules(rules or [])
     mapping = build_fill_mapping(report, max_fills=AI_REVIEW_MAX_FILLS)
     fills = mapping['fills']
     by_id = {f['fill_id']: f for f in fills}
@@ -912,10 +1174,10 @@ def validate_key_trade_reviews(report, payload) -> Dict:
     if not isinstance(payload, dict):
         errors.append('本轮回复没有可解析的机器 JSON，无法生成重点交易深度点评')
         return {
-            'fill_reviews': [], 'key_trade_reviews': [], 'errors': errors,
+            'fill_reviews': [], 'key_trade_reviews': [], 'rule_check': [], 'errors': errors,
             'coverage': {'trades': len(fills), 'used_trades': len(fills),
                          'skipped_trades': mapping.get('skipped_trades', 0) or 0,
-                         'cycles': len(cycles), 'key_trades': 0},
+                         'cycles': len(cycles), 'key_trades': 0, 'rules': len(rules)},
         }
 
     raw_keys = payload.get('key_trade_reviews')
@@ -961,13 +1223,16 @@ def validate_key_trade_reviews(report, payload) -> Dict:
     elif raw_keys is not None:
         errors.append('key_trade_reviews 不是数组，已忽略')
 
+    rule_check = _normalize_rule_check(payload, rules, by_id, errors)
+
     return {
         'fill_reviews': [],   # V2.3：逐笔点评不再生成；历史报告的旧数据仍在数据库里，默认不展示
         'key_trade_reviews': keys,
+        'rule_check': rule_check,
         'errors': errors,
         'coverage': {'trades': len(fills), 'used_trades': len(fills),
                      'skipped_trades': mapping.get('skipped_trades', 0) or 0,
-                     'cycles': len(cycles), 'key_trades': len(keys)},
+                     'cycles': len(cycles), 'key_trades': len(keys), 'rules': len(rules)},
     }
 
 
@@ -1422,12 +1687,33 @@ def build_report_export_markdown(username, session_id, session, report, ai_analy
             )
     else:
         lines.append('- 该用户还没有历史问题档案（本轮可能是首次复盘）。')
+
+    rules_snapshot = normalize_trading_rules(_user_trading_rules(username))
+    rule_checks = review_meta.get('rule_check') or []
+    lines += ['', '## 九、交易规则与纪律对照（导出时快照）', '']
+    if rules_snapshot:
+        lines.append('- 本轮配置的交易规则：')
+        for idx, rule in enumerate(rules_snapshot, start=1):
+            lines.append(f'  - R{idx}｜{rule}')
+    else:
+        lines.append('- 本轮没有配置交易规则，无法做规则一致性对照。')
+    if rule_checks:
+        lines += ['', '| 规则 | 结论 | 说明 | 证据成交 |', '| --- | --- | --- | --- |']
+        for check in rule_checks:
+            verdict = RULE_VERDICT_LABELS.get(str(check.get('verdict')), str(check.get('verdict') or '—'))
+            lines.append(
+                f'| {_md_cell(check.get("rule_id"))} {_md_cell(check.get("rule"))} | {verdict} '
+                f'| {_md_cell(check.get("detail"))} | {_md_cell(_md_join(check.get("evidence_fill_ids")))} |'
+            )
+    elif rules_snapshot:
+        lines.append('- 本轮 AI 没有返回规则对照结果（可能未开启 AI 复盘或模型输出缺少 rule_check）。')
+
     lines += [
         '',
-        '## 九、AI 复盘原文',
+        '## 十、AI 复盘原文',
         '',
         (_demote_markdown_headings(ai_analysis) or '- 本轮没有 AI 复盘原文（可能未开启 AI 分析或接口失败）。'),        '',
-        '## 十、口径与说明',
+        '## 十一、口径与说明',
         '',
         f'- 成交价：当日收盘价；T+1（当日买入当日不可卖）。',
         f'- 费用设置：佣金率 {commission_settings.get("commission_rate", "—")}、最低佣金 {commission_settings.get("min_commission", "—")}、印花税率 {commission_settings.get("stamp_tax_rate", "—")}。',
@@ -1442,10 +1728,22 @@ def build_report_export_markdown(username, session_id, session, report, ai_analy
 
 # ---------------------------------------------------------------- 提示词组装
 
+RULE_CHECK_APPENDIX = """
+【用户交易规则对照附加协议】
+1. 必须逐条对照【用户交易规则（纪律对照基准）】中的每条规则，只判断本轮成交是否遵守，不评价规则本身的盈亏，不做收益排名。
+2. 在复盘 JSON 的顶层额外输出 rule_check 数组：{"rule_id":"R1","verdict":"COMPLIED|VIOLATED|INSUFFICIENT_DATA|NOT_APPLICABLE","detail":"依据当时可见信息的判断","evidence_fill_ids":["F001"]}。
+3. VIOLATED 必须给出至少一个真实 evidence_fill_ids；证据不足或不存在时只能写 INSUFFICIENT_DATA。
+4. 不得用卖出之后的走势反推违规；没有配置规则时 rule_check 输出空数组。
+"""
+
+
 def build_ai_review_messages(report, username=None):
     """组装 AI 复盘 messages：程序算好数据，模型只做判断"""
     custom_prompt, default_prompt = get_ai_review_prompt(username)
     requirements = custom_prompt.strip() or default_prompt
+    if custom_prompt.strip() and _user_trading_rules(username):
+        # 自定义提示词可能是旧版协议：补一段最小规则对照契约，避免规则发了但模型不返回结果
+        requirements = requirements.rstrip() + '\n' + RULE_CHECK_APPENDIX
     requirements = requirements.replace('{historical_issues}', '见下方【历史问题档案】')
     for key, getter in AI_PROMPT_PLACEHOLDERS.items():
         try:
@@ -1475,6 +1773,9 @@ def build_ai_review_messages(report, username=None):
             "",
             "【策略与纪律规则】",
             build_strategy_rules(username),
+            "",
+            "【用户交易规则（纪律对照基准）】",
+            build_user_rules_context(username),
             "",
             "【成交记录与持仓还原】",
             build_fill_context(report, mapping),
@@ -1559,7 +1860,7 @@ def analyze_report_with_ai(report, username=None):
                 summary = merge_review_history(username, history, report.get('session_id') or '')
                 if summary:
                     print(summary)
-            structured = validate_key_trade_reviews(report, history)
+            structured = validate_key_trade_reviews(report, history, rules=_user_trading_rules(username))
             if structured['errors']:
                 print('结构化点评校验提示：' + '；'.join(structured['errors'][:6]))
             structured['review_id'] = report.get('session_id') or ''
@@ -2701,9 +3002,10 @@ def get_fill_reviews(username, session_id):
         reviews = record.get('fill_reviews') or []
         keys = record.get('key_trade_reviews') or []
         meta = record.get('review_meta') or {}
+        rule_check = meta.get('rule_check') or []
         report = record.get('report') or {}
         fills = []
-        coverage = {'trades': 0, 'used_trades': 0, 'skipped_trades': 0, 'cycles': 0, 'key_trades': len(keys)}
+        coverage = {'trades': 0, 'used_trades': 0, 'skipped_trades': 0, 'cycles': 0, 'key_trades': len(keys), 'rules': len(rule_check)}
         if report:
             mapping = build_fill_mapping(report, max_fills=AI_REVIEW_MAX_FILLS)
             fills = [{
@@ -2725,14 +3027,17 @@ def get_fill_reviews(username, session_id):
                 'skipped_trades': mapping.get('skipped_trades', 0),
                 'cycles': len({f['trade_cycle_id'] for f in fills if f.get('trade_cycle_id')}),
                 'key_trades': len(keys),
+                'rules': len(rule_check),
             }
         return jsonify({
             'session_id': session_id,
-            'available': bool(keys or reviews),
+            'available': bool(keys or reviews or rule_check),
             'has_ai_analysis': bool(record.get('ai_analysis')),
             'fill_reviews': reviews,           # legacy：V2.2 逐笔短评，V2.3 界面不再展示
             'legacy_fill_reviews': True,
             'key_trade_reviews': keys,
+            'rule_check': rule_check,
+            'rules_configured': len(_user_trading_rules(username)),
             'fills': fills,
             'coverage': coverage,
             'errors': meta.get('errors') or [],
