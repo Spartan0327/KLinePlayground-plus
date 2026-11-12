@@ -769,6 +769,20 @@ function setupEventListeners() {
     // 复盘报告
     document.getElementById('view-full-chart-btn').addEventListener('click', viewFullChart);
     document.getElementById('export-report-md-btn').addEventListener('click', exportReportMarkdown);
+    // AI 实时陪练
+    document.getElementById('ai-coach-btn')?.addEventListener('click', () => toggleCoachPanel());
+    document.getElementById('ai-coach-close-btn')?.addEventListener('click', () => toggleCoachPanel(false));
+    document.getElementById('ai-coach-clear-btn')?.addEventListener('click', () => resetCoachChat(false));
+    document.getElementById('ai-coach-send-btn')?.addEventListener('click', () => sendCoachQuestion(document.getElementById('ai-coach-input')?.value));
+    document.getElementById('ai-coach-input')?.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter' && !event.shiftKey) {
+            event.preventDefault();
+            sendCoachQuestion(event.target.value);
+        }
+    });
+    document.querySelectorAll('.ai-coach-chip').forEach((chip) => {
+        chip.addEventListener('click', () => sendCoachQuestion(chip.dataset.q));
+    });
     document.getElementById('equity-scale-linear')?.addEventListener('click', () => applyEquityScaleMode(false));
     document.getElementById('equity-scale-log')?.addEventListener('click', () => applyEquityScaleMode(true));
     document.getElementById('ai-analyze-btn').addEventListener('click', requestAIAnalysis);
@@ -2274,6 +2288,7 @@ async function startTraining() {
             currentTraining = await response.json();
             currentTraining.period = period;
             currentReportData = null;
+            resetCoachChat(true);
             hideTrainingSetup();
             document.getElementById('report-interface').classList.add('hidden');
             showTrainingInterface();
@@ -5237,6 +5252,102 @@ async function saveIssueDetail() {
     } catch (e) {
         console.error('保存历史问题失败:', e);
         alert('保存失败');
+    }
+}
+
+let coachHistory = [];
+let coachBusy = false;
+
+function setCoachContext(text) {
+    const el = document.getElementById('ai-coach-context');
+    if (el) el.textContent = text;
+}
+
+function resetCoachChat(closePanel = false) {
+    coachHistory = [];
+    const box = document.getElementById('ai-coach-messages');
+    if (box) {
+        box.innerHTML = '<div class="ai-coach-empty">陪练只读取当前 Bar 及之前的 K 线、指标和你的持仓。它不会预测后面怎么走，也不会替你下单。<br>先推进几根 K 线，再问它结构、量能或仓位问题。</div>';
+    }
+    setCoachContext('只看到当前 Bar 及之前的数据');
+    if (closePanel) {
+        document.getElementById('ai-coach-panel')?.classList.add('hidden');
+    }
+}
+
+function toggleCoachPanel(forceVisible) {
+    const panel = document.getElementById('ai-coach-panel');
+    if (!panel) return;
+    const willShow = typeof forceVisible === 'boolean' ? forceVisible : panel.classList.contains('hidden');
+    if (willShow) {
+        const id = currentTraining && (currentTraining.id || currentTraining.session_id);
+        if (!id) {
+            alert('训练还没开始，AI 陪练要在一轮训练里使用');
+            return;
+        }
+        panel.classList.remove('hidden');
+        document.getElementById('ai-coach-input')?.focus();
+    } else {
+        panel.classList.add('hidden');
+    }
+}
+
+function appendCoachMessage(role, content, meta) {
+    const box = document.getElementById('ai-coach-messages');
+    if (!box) return;
+    box.querySelector('.ai-coach-empty')?.remove();
+    const bubble = document.createElement('div');
+    bubble.className = `ai-coach-msg ${role}`;
+    bubble.textContent = content;
+    if (meta) {
+        const note = document.createElement('div');
+        note.className = 'ai-coach-meta';
+        note.textContent = meta;
+        bubble.appendChild(note);
+    }
+    box.appendChild(bubble);
+    box.scrollTop = box.scrollHeight;
+}
+
+async function sendCoachQuestion(rawQuestion) {
+    const question = String(rawQuestion || '').trim();
+    if (!question || coachBusy) return;
+    const trainingId = currentTraining && (currentTraining.id || currentTraining.session_id);
+    if (!trainingId) {
+        alert('训练还没开始，AI 陪练要在一轮训练里使用');
+        return;
+    }
+
+    coachBusy = true;
+    const sendBtn = document.getElementById('ai-coach-send-btn');
+    const input = document.getElementById('ai-coach-input');
+    if (sendBtn) { sendBtn.disabled = true; sendBtn.textContent = '思考中…'; }
+    if (input) input.value = '';
+    appendCoachMessage('user', question);
+
+    const priorTurns = coachHistory.slice(-6);
+    coachHistory.push({ role: 'user', content: question });
+    try {
+        const res = await fetch(`${API_BASE}/training/${encodeURIComponent(trainingId)}/coach`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ question, history: priorTurns })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || '陪练接口返回失败');
+        appendCoachMessage('assistant', data.answer, `Bar ${data.meta?.bar_id ?? '—'} · ${data.meta?.date ?? '—'} · 仅基于已发生数据`);
+        coachHistory.push({ role: 'assistant', content: data.answer });
+        if (data.meta) {
+            setCoachContext(`当前 Bar ${data.meta.bar_id}（${data.meta.date}）· 可见 ${data.meta.visible_bars} 根 · 模型 ${data.meta.model}`);
+        }
+    } catch (error) {
+        console.error('AI 陪练失败:', error);
+        appendCoachMessage('error', error.message || '陪练请求失败，请稍后再试');
+        coachHistory.pop();
+    } finally {
+        coachBusy = false;
+        if (sendBtn) { sendBtn.disabled = false; sendBtn.textContent = '发送'; }
+        document.getElementById('ai-coach-input')?.focus();
     }
 }
 

@@ -454,6 +454,28 @@
         </div>
 
         <div id="training-interface" class="hidden">
+            <div id="ai-coach-panel" class="ai-coach-panel hidden">
+                <div class="ai-coach-head">
+                    <div class="ai-coach-title">
+                        <strong>AI 陪练</strong>
+                        <span id="ai-coach-context" class="ai-coach-context">只看到当前 Bar 及之前的数据</span>
+                    </div>
+                    <div class="ai-coach-head-actions">
+                        <button id="ai-coach-clear-btn" class="ai-coach-icon-btn" title="清空对话">清空</button>
+                        <button id="ai-coach-close-btn" class="ai-coach-icon-btn" title="收起">✕</button>
+                    </div>
+                </div>
+                <div id="ai-coach-messages" class="ai-coach-messages"></div>
+                <div class="ai-coach-chips">
+                    <button class="ai-coach-chip" data-q="这根K线的形态和量能说明什么？">这根什么形态</button>
+                    <button class="ai-coach-chip" data-q="以我现在的持仓和成本，这个位置的风险收益怎么样？">我的持仓风险</button>
+                    <button class="ai-coach-chip" data-q="如果我想在这里买入，止损该放哪、依据是什么？">买入与止损</button>
+                </div>
+                <div class="ai-coach-input">
+                    <textarea id="ai-coach-input" rows="2" placeholder="问点什么，例如：这里追高的风险在哪？"></textarea>
+                    <button id="ai-coach-send-btn" class="btn btn-primary">发送</button>
+                </div>
+            </div>
             <div class="left-panel">
                 <div class="control-section">
                     <h3>账户信息</h3>
@@ -469,6 +491,7 @@
                     <h3>训练控制</h3>
                     <div class="training-controls">
                         <div id="training-progress" class="progress-info">进度: 0%</div>
+                        <button id="ai-coach-btn" class="btn btn-info">AI 陪练</button>
                         <button id="end-training-btn" class="btn btn-warning">结束训练</button>
                         <button id="reset-training-btn" class="btn btn-secondary">重置训练</button>
                     </div>

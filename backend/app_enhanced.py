@@ -1571,6 +1571,233 @@ def analyze_report_with_ai(report, username=None):
         return f"AI 分析请求发生错误: {str(e)}", None
 
 
+# ---------------------------------------------------------------- AI 实时陪练
+
+AI_COACH_SYSTEM_PROMPT = """A股 K线复盘训练器 · 实时陪练（MASTER PROMPT V2.4 陪练版）
+
+一、角色
+你是用户在做 K 线复盘训练时的陪练教练。用户每推进一步都会看到新的 K 线，你可以基于「已经发生的行情」帮他理解结构、指标、仓位与规则，但你没有预测能力，也不替用户下单。
+
+二、数据边界（最高优先级）
+1. 只使用本轮消息里给出的【当前状态】【最近 K 线】【技术指标】【持仓与成交】【交易规则】。没有给出的数据一律不得假设、不得编造。
+2. 你看到的数据截止到当前 Bar（已收盘）。之后的走势对你和用户都未知：禁止推断、暗示、描述「后面会怎么走」，禁止出现「接下来大概率会……」「明天会……」这类表述。
+3. 不预测具体价格、点位、涨跌幅和转折时间；不声称某个位置「一定会」或「不可能」。
+4. 不得虚构价格、Bar ID、指标数值、成交量、新闻或基本面消息。
+5. 若用户要求预测，直接说明「训练器不提供未来数据，我只能讲当前结构的含义和条件式应对」，然后给出条件式分析。
+
+三、回答口径
+1. 分开写清：已确认事实（数据里能直接读到的）、推断（有条件的假设）、不确定（缺什么数据）。
+2. 用户问「该不该买 / 卖 / 加仓」时，不要直接下指令。先给当前结构判断（趋势位置、量能、指标状态、仓位与成本），再列支持理由与反对理由，给出触发条件和失效条件，最后明确「决定权在你」。
+3. 禁止结果论：不得用「后来涨了/跌了」评价用户之前的操作，也不得暗示「你刚才本该如何」。评价只基于当时可见的信息和既定规则。
+4. 讨论仓位时必须结合：可用现金、持仓股数、平均成本、浮盈比例、止损止盈规则、禁买期状态。空仓时说明这是新开仓问题。
+5. 数据不足就直说缺什么（例如没有分时、没有板块数据），不要用常识补。
+6. 简洁：中文，先结论后依据，总字数控制在 300 字以内；不复述整张数据表。
+7. 用户连续追问时沿用同一口径，不要重复已经给过的内容，除非数据发生了变化。
+
+四、默认输出结构
+【结论】1—2 句，回答用户真正问的问题。
+【依据】2—3 条，必须带 Bar ID 或日期，以及具体指标数值。
+【风险与反方】1—2 条，指出这个判断最可能错在哪里。
+【观察点】1—2 条条件式：如果 A 出现则关注 B；如果 C 出现则本轮判断失效。
+"""
+
+COACH_RECENT_BARS = 40
+
+
+def _coach_date(ts) -> str:
+    try:
+        return datetime.fromtimestamp(int(ts)).strftime('%Y-%m-%d')
+    except Exception:
+        return '—'
+
+
+def _coach_ma_periods(username):
+    try:
+        settings = (user_manager.get_user_config(username) or {}).get('settings') or {}
+        periods = settings.get('ma_periods') or [5, 10, 20, 60]
+        periods = [int(p) for p in periods if str(p).isdigit() or isinstance(p, int)]
+        return periods or [5, 10, 20, 60]
+    except Exception:
+        return [5, 10, 20, 60]
+
+
+def build_coach_context(training, include_bars=True) -> str:
+    """拼陪练上下文：只取当前 Bar 及之前的可见数据，绝不包含未来 K 线"""
+    kp = training['kline_processor']
+    ts = training['trade_simulator']
+    user = training['user']
+    current = kp.get_current_bar()
+    if not current:
+        return '【当前状态】当前没有可用的 K 线（训练可能已结束）。'
+
+    date = kp.get_current_date() or _coach_date(current.get('time'))
+    bar_id = current.get('bar_id')
+    visible = kp.get_visible_data()
+    account = ts.get_account_info(date)
+    rules = _review_settings(user)
+    cooldown_left = kp.get_cooldown_remaining() if hasattr(kp, 'get_cooldown_remaining') else 0
+
+    lines = [
+        '【当前状态】',
+        f"- 股票：{training.get('stock_code')}（训练周期：{training.get('period') or 'daily'}，数据源：{training.get('data_source') or '—'}）",
+        f"- 当前 Bar：Bar {bar_id}，{date}（已收盘，这是你能看到的最新一根）",
+        f"- 已完成 K 线：{len([b for b in visible if int(b.get('bar_id') or 0) >= 0])} 根",
+        f"- 账户：总资产 {_num(account.get('total_assets'))}；可用现金 {_num(account.get('available_cash'))}；"
+        f"总收益 {_num(account.get('total_return'))}%；浮盈 {_num(account.get('floating_pnl'))}",
+    ]
+    pos = account.get('position_summary')
+    if pos:
+        lines.append(
+            f"- 持仓：{pos.get('total_shares')} 股（可卖 {pos.get('available_shares')}），"
+            f"均价 {_num(pos.get('average_cost'))}，现价 {_num(pos.get('current_price'))}，"
+            f"浮盈 {_num(pos.get('pnl_percent'))}%"
+        )
+    else:
+        lines.append('- 持仓：空仓（这是新开仓问题）')
+    lines.append(
+        f"- 规则：止损 -{rules.get('stop_loss_percent')}%，止盈 +{rules.get('take_profit_percent')}%，"
+        f"清仓后禁买 {rules.get('cooldown_bars_after_flat')} 根；"
+        + (f"当前仍在禁买期，还剩 {cooldown_left} 根" if cooldown_left else "当前不在禁买期")
+    )
+
+    latest_ma_text = ''
+    if include_bars and visible:
+        periods = _coach_ma_periods(user)
+        ma_data = kp.get_ma_data(periods)
+        ma_map = {int(p): {int(item['bar_id']): item['value'] for item in series} for p, series in (ma_data or {}).items()}
+        latest_ma_text = ' / '.join(
+            f"MA{p} {_num(series[-1]['value'])}" for p, series in (ma_data or {}).items() if series
+        )
+        rows = [b for b in visible[-COACH_RECENT_BARS:] if int(b.get('bar_id') or 0) >= 0] or visible[-COACH_RECENT_BARS:]
+        head = '【最近 {} 根 K 线】（Bar / 日期 / 开 / 高 / 低 / 收 / 量 / '.format(len(rows))
+        head += ' / '.join(f'MA{p}' for p in periods) + '）'
+        lines += ['', head, '| Bar | 日期 | 开 | 高 | 低 | 收 | 量 | ' + ' | '.join(f'MA{p}' for p in periods) + ' |',
+                  '| --- | --- | --- | --- | --- | --- | --- | ' + ' | '.join('---' for _ in periods) + ' |']
+        for bar in rows:
+            values = []
+            for p in periods:
+                v = ma_map.get(p, {}).get(int(bar.get('bar_id')))
+                values.append(_num(v) if v is not None else '—')
+            lines.append(
+                f"| {bar.get('bar_id')} | {_coach_date(bar.get('time'))} | {_num(bar.get('open'))} "
+                f"| {_num(bar.get('high'))} | {_num(bar.get('low'))} | {_num(bar.get('close'))} "
+                f"| {_num(bar.get('volume'), 0)} | " + ' | '.join(values) + ' |'
+            )
+
+    lines += ['', '【技术指标（当前 Bar）】']
+    if latest_ma_text:
+        lines.append(f'- MA：{latest_ma_text}')
+
+    macd = (kp.get_technical_indicators('MACD') or {}).get('data') or []
+    if macd:
+        last = macd[-1]
+        hist_tail = [_num(item.get('histogram')) for item in macd[-3:]]
+        lines.append(f"- MACD：DIF {_num(last.get('dif'))} / DEA {_num(last.get('dea'))} / 柱 {_num(last.get('histogram'))}"
+                     f"（最近 3 根柱：{' / '.join(hist_tail)}）")
+    kdj = (kp.get_technical_indicators('KDJ') or {}).get('data') or []
+    if kdj:
+        last = kdj[-1]
+        lines.append(f"- KDJ：K {_num(last.get('k'))} / D {_num(last.get('d'))} / J {_num(last.get('j'))}")
+    rsi = (kp.get_technical_indicators('RSI') or {}).get('data') or []
+    if rsi:
+        last = rsi[-1]
+        keys = [k for k in last.keys() if k.startswith('rsi')]
+        lines.append('- RSI：' + ' / '.join(f"{k.upper()} {_num(last.get(k))}" for k in keys))
+    boll = (kp.get_technical_indicators('BOLL') or {}).get('data') or []
+    if boll:
+        last = boll[-1]
+        close = float(current.get('close') or 0)
+        upper, lower, middle = last.get('upper'), last.get('lower'), last.get('middle')
+        where = '—'
+        try:
+            if upper is not None and lower is not None and upper > lower:
+                where = f"带宽位置 {round((close - lower) / (upper - lower) * 100, 1)}%"
+        except Exception:
+            where = '—'
+        lines.append(f"- BOLL：上 {_num(upper)} / 中 {_num(middle)} / 下 {_num(lower)}（{where}）")
+    if visible:
+        avg_vol = sum(float(b.get('volume') or 0) for b in visible[-20:]) / min(20, len(visible))
+        if avg_vol:
+            lines.append(f"- 量能：当前 {_num(float(current.get('volume') or 0) / avg_vol)} 倍于近 20 根均量")
+
+    history = ts.get_trade_history_with_bar_id() or []
+    if history:
+        lines += ['', f'【本轮成交（共 {len(history)} 笔，最近 5 笔）】']
+        for trade in history[-5:]:
+            lines.append(
+                f"- Bar {trade.get('bar_id') or trade.get('bar') or '—'} {trade.get('date') or trade.get('trade_date') or '—'} "
+                f"{trade.get('action') or trade.get('side') or '—'} {trade.get('quantity')} 股 @ {_num(trade.get('price'))}"
+            )
+    else:
+        lines.append('\n【本轮成交】还没有成交（空仓起步）。')
+
+    lines += ['', '【数据边界】以上为当前 Bar 及之前的全部可见数据；之后走势未知，不得推测。']
+    return '\n'.join(lines)
+
+
+@app.route('/api/training/<training_id>/coach', methods=['POST'])
+def ai_coach_chat(training_id):
+    """AI 实时陪练：基于当前 Bar 及之前的行情、指标与账户回答用户问题"""
+    try:
+        if training_id not in active_trainings:
+            return jsonify({'error': '训练会话不存在或已结束'}), 404
+        training = active_trainings[training_id]
+        if training.get('status') == 'ended':
+            return jsonify({'error': '训练已结束，陪练不可用'}), 409
+
+        data = request.get_json(silent=True) or {}
+        question = str(data.get('question') or '').strip()
+        if not question:
+            return jsonify({'error': '问题不能为空'}), 400
+        if len(question) > 600:
+            return jsonify({'error': '问题太长，请压缩到 600 字以内'}), 400
+
+        ai_config = get_ai_config()
+        if not ai_config or not ai_config.get('api_key'):
+            return jsonify({'error': 'AI 接口未配置，请先在设置里填写 Base URL、模型和 API Key'}), 403
+
+        history = data.get('history') or []
+        cleaned = []
+        for msg in history[-8:]:
+            role = str((msg or {}).get('role') or '')
+            content = str((msg or {}).get('content') or '').strip()
+            if role in ('user', 'assistant') and content:
+                cleaned.append({'role': role, 'content': content[:1500]})
+
+        context = build_coach_context(training, include_bars=not cleaned)
+        messages = [{'role': 'system', 'content': AI_COACH_SYSTEM_PROMPT}]
+        messages.extend(cleaned)
+        messages.append({'role': 'user', 'content': f"{context}\n\n【我的问题】{question}"})
+
+        base_url = str(ai_config.get('base_url') or 'https://api.openai.com/v1').rstrip('/')
+        model = ai_config.get('model') or 'deepseek-chat'
+        headers = {'Authorization': f"Bearer {ai_config.get('api_key')}", 'Content-Type': 'application/json'}
+        payload = {'model': model, 'messages': messages, 'temperature': 0.5, 'max_tokens': 900}
+
+        response = requests.post(f"{base_url}/chat/completions", json=payload, headers=headers, timeout=90)
+        if response.status_code != 200:
+            return jsonify({'error': f'AI 接口返回 {response.status_code}: {response.text[:200]}'}), 502
+        answer = (response.json().get('choices') or [{}])[0].get('message', {}).get('content') or ''
+        answer = answer.strip()
+        if not answer:
+            return jsonify({'error': 'AI 没有返回内容，请重试'}), 502
+
+        current = training['kline_processor'].get_current_bar() or {}
+        return jsonify({
+            'answer': answer,
+            'meta': {
+                'bar_id': current.get('bar_id'),
+                'date': _coach_date(current.get('time')),
+                'model': model,
+                'visible_bars': len(training['kline_processor'].get_visible_data()),
+                'context_chars': len(context),
+            }
+        })
+    except Exception as e:
+        print(f'AI 陪练失败: {e}')
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/system/api_info', methods=['POST', 'DELETE'])
 def toggle_api_info():
     """手动切开/关 API暴露"""
