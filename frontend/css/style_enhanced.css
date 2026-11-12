@@ -2792,3 +2792,28 @@ body[data-theme="dark"] .history-item {
     border-radius: 3px;
     box-shadow: 0 0 12px rgba(245, 197, 66, 0.5);
 }
+
+#app-notice {
+    position: fixed;
+    top: 18px;
+    left: 50%;
+    transform: translate(-50%, -12px);
+    max-width: 560px;
+    padding: 10px 16px;
+    background: rgba(30, 34, 45, 0.94);
+    color: #fff;
+    font-size: 13px;
+    line-height: 1.5;
+    border-radius: 8px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+    white-space: pre-line;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s ease, transform 0.2s ease;
+    z-index: 4000;
+}
+
+#app-notice.show {
+    opacity: 1;
+    transform: translate(-50%, 0);
+}

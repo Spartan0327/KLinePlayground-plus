@@ -1886,6 +1886,9 @@ def start_training():
         
         if not user:
             return jsonify({'error': '用户名不能为空'}), 400
+
+        # 每轮开始前清掉上一轮随机选股留下的兜底提示，避免串到指定模式
+        data_manager.last_random_notice = None
         
         # 创建训练会话；同一秒内连续开始两次时给 ID 加后缀，避免撞上已有会话或历史库
         base_id = f"{user}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -1991,7 +1994,7 @@ def start_training():
             print(f"创建训练历史记录失败: {e}")
 
         
-        return jsonify({
+        result = {
             'id': training_id,
             'stock_code': stock_code,
             'start_date': start_date,
@@ -1999,7 +2002,11 @@ def start_training():
             'mode': mode,
             'data_source': data_source,
             'period': period
-        })
+        }
+        notice = getattr(data_manager, 'last_random_notice', None)
+        if notice:
+            result['notice'] = notice
+        return jsonify(result)
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
     except Exception as e:

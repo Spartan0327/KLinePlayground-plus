@@ -2302,6 +2302,7 @@ async function startTraining() {
         if (response.ok) {
             currentTraining = await response.json();
             currentTraining.period = period;
+            if (currentTraining.notice) showNotice(currentTraining.notice);
             currentReportData = null;
             resetCoachChat(true);
             hideTrainingSetup();
@@ -2330,8 +2331,23 @@ async function startTraining() {
     }
 }
 
-function showTrainingInterface() {
-    // 注意：#training-interface 是 #main-app 的子节点，不能隐藏 #main-app，
+let noticeTimer = null;
+
+function showNotice(text) {
+    if (!text) return;
+    let el = document.getElementById('app-notice');
+    if (!el) {
+        el = document.createElement('div');
+        el.id = 'app-notice';
+        document.body.appendChild(el);
+    }
+    el.textContent = text;
+    el.classList.add('show');
+    clearTimeout(noticeTimer);
+    noticeTimer = setTimeout(() => el.classList.remove('show'), 6000);
+}
+
+function showTrainingInterface() {    // 注意：#training-interface 是 #main-app 的子节点，不能隐藏 #main-app，
     // 否则训练界面会跟着一起消失（表现为整窗白屏）。改用 training-mode 只隐藏主菜单外壳。
     const mainApp = document.getElementById('main-app');
     mainApp.classList.remove('hidden');

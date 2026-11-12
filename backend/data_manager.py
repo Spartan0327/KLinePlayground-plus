@@ -45,6 +45,8 @@ class DataManager:
         self._stock_list_lock = threading.Lock()
         self._offline_stock_codes_cache: Optional[List[str]] = None
         self._offline_date_range_cache: Dict[str, Optional[Tuple[pd.Timestamp, pd.Timestamp]]] = {}
+        self.last_fetch_error: Optional[str] = None
+        self.last_random_notice: Optional[str] = None
 
     def download_stock_list(self) -> bool:
         """下载 A 股股票列表。"""
@@ -928,6 +930,7 @@ class DataManager:
             bundle = self._fetch_stock_bundle(stock_code, start_date, source)
             return self._save_bundle_to_cache(stock_code, bundle.get("kline"), bundle.get("factor"))
         except Exception as e:
+            self.last_fetch_error = str(e)
             print(f"下载股票 {stock_code} 数据失败: {e}")
             return False
 
@@ -976,6 +979,7 @@ class DataManager:
                 return self._resample_to_weekly(normalized)
             return normalized
         except Exception as e:
+            self.last_fetch_error = str(e)
             print(f"获取股票 {stock_code} 数据失败: {e}")
             return None
 
@@ -1085,6 +1089,7 @@ class DataManager:
         interval: str = "daily",
     ) -> Tuple[str, str]:
         """随机选择股票与起始日期。"""
+        self.last_random_notice = None
         range_start, range_end = self._resolve_training_range(date_start, date_end)
 
         if source == "offline":
@@ -1120,17 +1125,67 @@ class DataManager:
 
         random.shuffle(stock_codes)
         max_attempts = min(len(stock_codes), 80)
+        consecutive_failures = 0
         for stock_code in stock_codes[:max_attempts]:
             date_range = self._get_stock_date_range(stock_code, source=source, interval=interval)
             if date_range is None:
+                consecutive_failures += 1
+                # 行情接口被限流时会连续取不到数据，继续试只会延长限流时间
+                if consecutive_failures >= 6:
+                    break
                 continue
+            consecutive_failures = 0
             stock_start, stock_end = date_range
             available_start = max(range_start, stock_start)
             available_end = min(range_end, stock_end)
             if available_start <= available_end:
                 return stock_code, self._random_date_in_range(available_start, available_end)
 
-        raise ValueError("所选数据源中没有符合条件的股票，请调整板块或日期范围后重试")
+        cached_pick = self._random_stock_from_local_cache(sector, range_start, range_end)
+        if cached_pick is not None:
+            self.last_random_notice = "行情接口暂时不可用，本次随机训练改用本地已缓存的行情数据。"
+            return cached_pick
+
+        detail = (self.last_fetch_error or "").strip()
+        message = "行情接口暂时取不到数据，已停止继续请求以避免触发更久的限流。请等 5–10 分钟后重试，或改用「指定模式」选择本地已有缓存的股票。"
+        if detail:
+            message = f"{message}\n\n接口返回：{detail}"
+        raise ValueError(message)
+
+    def _get_cached_stock_codes(self) -> List[str]:
+        """列出本地 kline_raw 缓存里已有的股票代码（不联网）。"""
+        if not os.path.isdir(self.kline_dir):
+            return []
+        codes = []
+        for filename in os.listdir(self.kline_dir):
+            if not filename.lower().endswith(".csv"):
+                continue
+            code = self._normalize_stock_code(os.path.splitext(filename)[0])
+            if code:
+                codes.append(code)
+        return sorted(set(codes))
+
+    def _random_stock_from_local_cache(
+        self,
+        sector: str,
+        range_start: pd.Timestamp,
+        range_end: pd.Timestamp,
+    ) -> Optional[Tuple[str, str]]:
+        """行情接口不可用时，从本地缓存里挑一只仍覆盖目标日期范围的股票。"""
+        candidates: List[Tuple[str, pd.Timestamp, pd.Timestamp]] = []
+        for stock_code in self._filter_stock_codes_by_sector(self._get_cached_stock_codes(), sector):
+            data = self._load_cached_kline(stock_code)
+            if data is None or data.empty or "date" not in data:
+                continue
+            available_start = max(range_start, data["date"].min())
+            available_end = min(range_end, data["date"].max())
+            if available_start <= available_end:
+                candidates.append((stock_code, available_start, available_end))
+
+        if not candidates:
+            return None
+        stock_code, available_start, available_end = random.choice(candidates)
+        return stock_code, self._random_date_in_range(available_start, available_end)
 
     def _build_offline_path(self, stock_code: str) -> str:
         stock_code = self._normalize_stock_code(stock_code)
