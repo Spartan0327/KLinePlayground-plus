@@ -41,6 +41,7 @@ else:
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 users_dir_path = os.path.join(project_root, 'users')
 data_dir_path = os.path.join(project_root, 'data')
+report_export_dir_path = os.path.join(project_root, 'report_exports')
 
 # 初始化管理器
 data_manager = DataManager(data_dir=data_dir_path)
@@ -2919,30 +2920,59 @@ def get_training_history_detail(username, session_id):
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+def build_training_report_export_payload(username, session_id):
+    """组装单期复盘的 Markdown 数据包；报告不存在时返回 None。"""
+    record = user_manager.get_report_and_analysis(username, session_id)
+    report = record.get('report')
+    if not report:
+        return None
+    session = None
+    for item in user_manager.get_training_history(username, limit=500):
+        if item.get('session_id') == session_id:
+            session = item
+            break
+    try:
+        archive = review_history.load(user_manager.users_dir, username)
+        issues = archive.get('issues') or []
+    except Exception:
+        issues = []
+    markdown = build_report_export_markdown(
+        username, session_id, session, report,
+        record.get('ai_analysis'), record.get('review_meta'), issues
+    )
+    filename = f"{report.get('stock_code') or 'report'}_{session_id}_复盘数据包.md"
+    return {'markdown': markdown, 'filename': filename, 'chars': len(markdown)}
+
+
 @app.route('/api/users/<username>/history/<session_id>/export', methods=['GET'])
 def export_training_report_markdown(username, session_id):
     """导出单期复盘的 Markdown 数据包（走势 + 全部数据 + AI 原文）"""
     try:
-        record = user_manager.get_report_and_analysis(username, session_id)
-        report = record.get('report')
-        if not report:
+        payload = build_training_report_export_payload(username, session_id)
+        if not payload:
             return jsonify({'error': '这次训练没有保存报告，无法导出'}), 404
-        session = None
-        for item in user_manager.get_training_history(username, limit=500):
-            if item.get('session_id') == session_id:
-                session = item
-                break
-        try:
-            archive = review_history.load(user_manager.users_dir, username)
-            issues = archive.get('issues') or []
-        except Exception:
-            issues = []
-        markdown = build_report_export_markdown(
-            username, session_id, session, report,
-            record.get('ai_analysis'), record.get('review_meta'), issues
-        )
-        filename = f"{report.get('stock_code') or 'report'}_{session_id}_复盘数据包.md"
-        return jsonify({'markdown': markdown, 'filename': filename, 'chars': len(markdown)})
+        return jsonify(payload)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/users/<username>/history/<session_id>/export-file', methods=['POST'])
+def save_training_report_markdown(username, session_id):
+    """把复盘数据包直接写入项目下的 report_exports 目录。"""
+    try:
+        payload = build_training_report_export_payload(username, session_id)
+        if not payload:
+            return jsonify({'error': '这次训练没有保存报告，无法导出'}), 404
+        os.makedirs(report_export_dir_path, exist_ok=True)
+        filename = os.path.basename(payload['filename'])
+        target = os.path.join(report_export_dir_path, filename)
+        with open(target, 'w', encoding='utf-8', newline='') as f:
+            f.write(payload['markdown'])
+        return jsonify({
+            'path': target,
+            'filename': filename,
+            'chars': payload['chars'],
+        })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 

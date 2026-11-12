@@ -6540,3 +6540,6 @@ chart_render_temp.html
 ai_api_info.json
 # --- IDE ---
 /.idea/
+
+# 复盘数据包导出目录
+/report_exports/

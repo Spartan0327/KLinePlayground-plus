@@ -25,7 +25,7 @@ from backend.app_enhanced import app
 
 
 class DesktopApi:
-    """暴露给前端的最小桌面能力：把导出内容直接写入系统下载目录。"""
+    """暴露给前端的最小桌面能力：把导出内容直接写入项目下的数据目录。"""
 
     def save_export(self, markdown, filename):
         if not isinstance(markdown, str) or not markdown:
@@ -35,10 +35,11 @@ class DesktopApi:
         if not name.lower().endswith('.md'):
             name += '.md'
 
-        downloads = Path.home() / 'Downloads'
-        downloads.mkdir(parents=True, exist_ok=True)
-        target = downloads / name
-        target.write_text(markdown, encoding='utf-8')
+        exports = Path(project_root) / 'report_exports'
+        exports.mkdir(parents=True, exist_ok=True)
+        target = exports / name
+        with open(target, 'w', encoding='utf-8', newline='') as f:
+            f.write(markdown)
         return {'path': str(target)}
 
 

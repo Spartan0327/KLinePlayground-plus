@@ -5913,6 +5913,15 @@ async function sendCoachQuestion(rawQuestion) {
     }
 }
 
+async function tryServerExport(sid) {
+    const res = await fetch(`${API_BASE}/users/${encodeURIComponent(currentUser)}/history/${encodeURIComponent(sid)}/export-file`, {
+        method: 'POST',
+    });
+    const data = await res.json();
+    if (!res.ok || !data.path) throw new Error(data.error || '服务端保存失败');
+    return data.path;
+}
+
 async function tryDesktopExport(markdown, filename) {
     const api = window.pywebview && window.pywebview.api;
     if (!api || typeof api.save_export !== 'function') return null;
@@ -5929,14 +5938,29 @@ async function exportReportMarkdown() {
         return;
     }
     try {
+        let savedPath = null;
+        try {
+            savedPath = await tryServerExport(sid);
+        } catch (serverError) {
+            console.warn('服务端保存导出文件失败，回退兼容路径:', serverError);
+        }
+        if (savedPath) {
+            alert(`已导出到:\n${savedPath}`);
+            return;
+        }
+
         const res = await fetch(`${API_BASE}/users/${encodeURIComponent(currentUser)}/history/${encodeURIComponent(sid)}/export`);
         const data = await res.json();
         if (!res.ok) { alert(data.error || '导出失败'); return; }
         const markdown = data.markdown || '';
         const filename = data.filename || '复盘数据包.md';
-        const desktopPath = await tryDesktopExport(markdown, filename);
-        if (desktopPath) {
-            alert(`已导出到:\n${desktopPath}`);
+        try {
+            savedPath = await tryDesktopExport(markdown, filename);
+        } catch (desktopError) {
+            console.warn('桌面端保存导出文件失败，回退浏览器下载:', desktopError);
+        }
+        if (savedPath) {
+            alert(`已导出到:\n${savedPath}`);
             return;
         }
         const blob = new Blob([markdown], { type: 'text/markdown;charset=utf-8' });
