@@ -768,6 +768,7 @@ function setupEventListeners() {
 
     // 复盘报告
     document.getElementById('view-full-chart-btn').addEventListener('click', viewFullChart);
+    document.getElementById('export-report-md-btn').addEventListener('click', exportReportMarkdown);
     document.getElementById('equity-scale-linear')?.addEventListener('click', () => applyEquityScaleMode(false));
     document.getElementById('equity-scale-log')?.addEventListener('click', () => applyEquityScaleMode(true));
     document.getElementById('ai-analyze-btn').addEventListener('click', requestAIAnalysis);
@@ -5236,6 +5237,31 @@ async function saveIssueDetail() {
     } catch (e) {
         console.error('保存历史问题失败:', e);
         alert('保存失败');
+    }
+}
+
+async function exportReportMarkdown() {
+    const sid = (currentReportData && currentReportData.session_id)
+        || (currentTraining && (currentTraining.id || currentTraining.session_id));
+    if (!currentUser || !sid) {
+        alert('还没有可导出的复盘报告，请先完成一次训练或打开一条历史记录');
+        return;
+    }
+    try {
+        const res = await fetch(`${API_BASE}/users/${encodeURIComponent(currentUser)}/history/${encodeURIComponent(sid)}/export`);
+        const data = await res.json();
+        if (!res.ok) { alert(data.error || '导出失败'); return; }
+        const blob = new Blob([data.markdown || ''], { type: 'text/markdown;charset=utf-8' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = data.filename || '复盘数据包.md';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+    } catch (e) {
+        console.error('导出复盘数据包失败:', e);
+        alert('导出失败');
     }
 }
 

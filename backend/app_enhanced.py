@@ -536,6 +536,11 @@ DEFAULT_AI_REVIEW_PROMPT = """A股 K线交易训练复盘专家 MASTER PROMPT V2
 5. 没有 OHLCV 时不得声称分析了真实 K 线形态；数据源未提供成交量，不得虚构量能判断。
 6. 程序已计算现金、市值、均价、浮盈、累计已实现、仓位、回撤，不得重新推算基础数据，也不得因数字缺失而编造。
 7. 不做佣金、印花税、交易成本分析；不自动引入大盘指数与行业指数；不修改用户原有买卖信号与参数。
+8. 卖出与持仓评价只能使用「决策时点已经可见的信息」：成本、浮盈比例、仓位、持仓天数、当根及此前已完成的 K 线、当时既有的规则。卖出之后的价格走势属于事后信息，不得作为判断该笔卖出对错的依据。
+9. 严格禁止结果论：卖出后继续上涨，不等于卖出错误；卖出后下跌，也不等于卖出正确。若报告中确实需要提到卖出后的走势，必须显式标注「事后信息，决策时不可知」，且不得据此加分或扣分。
+10. 严格禁止双重标准：不得对同一类行为两头都批评。若用「没有让利润奔跑」批评提前止盈，就不能同时对持有回撤批评「没有及时止盈」；两者只能按同一套事先给定的卖出规则来判定，不能各用一套后验标准。
+11. 判定「过早止盈 / 盈利回吐 / 延迟止损」等分类前，必须先引用当时的触发规则（止盈线、回撤阈值、减仓比例、信号失效条件等），再核对成交是否符合该规则。用户没有既定卖出规则时，只能写「缺少可执行的卖出规则」并建议建立规则，不得用事后最优路径反推当时的决策错误。
+12. 评价句必须写成「依据当时的 X 信息，该操作是否遵守 Y 规则」；禁止「如果再多拿几天就……」「要是早点卖就……」这类后验假设式结论。
 
 三、第一部分：总体印象
 用 2—3 句话回答：本轮整体表现如何、最主要盈利来源、最大问题、是否存在收益依赖少数交易或盈利回吐。不要重复数字清单。
@@ -591,6 +596,7 @@ B. 收益表现（100 分）：净收益表现 25、最大回撤控制 25、盈�
 7. 经验总结：一条可以带走的原则。
 8. 后续改进建议：1—3 条，可直接执行、可量化验证。
 9. 证据成交：evidence_fill_ids，必须来自本轮成交表。
+10. 卖出与持仓评价必须遵守第二部分的反结果论规则，不得用卖出之后的走势证明当时卖得对不对。
 没有达到深评标准的周期时，明确写「本轮没有达到深评标准的交易周期」，不要凑数。
 附录B 历史问题证据（可选，仅在确有对照结果时输出）
 逐条列出问题 ID、观察结论、证据。
@@ -1222,6 +1228,216 @@ def build_strategy_rules(username) -> str:
         "- 成交方式：按当日收盘价成交，T+1（当日买入不可卖）",
         "- 以上为现有规则原文，不得自行修改参数或新增买卖信号",
     ])
+
+
+# ---------------------------------------------------------------- 报告导出
+
+def _md_cell(value) -> str:
+    """表格单元格转义：竖线与换行会破坏 Markdown 表格"""
+    if value is None:
+        return '—'
+    text = str(value).replace('|', '\\|').replace('\r', ' ').replace('\n', ' ')
+    return text if text else '—'
+
+
+def _md_join(items) -> str:
+    if not items:
+        return '—'
+    return '；'.join(str(i) for i in items)
+
+
+def _demote_markdown_headings(text) -> str:
+    """AI 原文的标题整体降两级，避免与导出文档自己的目录混在一起"""
+    if not text:
+        return ''
+    out = []
+    for line in str(text).splitlines():
+        out.append('##' + line if line.lstrip().startswith('#') else line)
+    return '\n'.join(out)
+
+
+def build_report_export_markdown(username, session_id, session, report, ai_analysis, review_meta=None, issues=None):
+    """导出单期复盘的 Markdown 数据包
+
+    内容＝该轮 AI 复盘实际用到的全部数据（成交流水、成交窗口 K 线、逐 Bar 资金快照、
+    重点交易、历史问题档案）＋ AI 复盘原文，便于拿到外部讨论交易规则。
+    """
+    report = report or {}
+    session = session or {}
+    review_meta = review_meta or {}
+    bars = _bar_index(report)
+    curve = report.get('equity_curve') or []
+    mapping = build_fill_mapping(report)
+    stock_name = report.get('stock_name') or session.get('stock_name') or '—'
+    stock_code = report.get('stock_code') or session.get('stock_code') or '—'
+    if stock_code != '—' and stock_name == f'股票{stock_code}':
+        stock_name = stock_code  # 数据源把名称写成「股票300557」，导出时去掉重复
+    initial = float(report.get('initial_capital') or 0)
+    final_capital = report.get('final_capital')
+    total_return = report.get('total_return')
+    max_dd = report.get('max_drawdown')
+    total_trades = report.get('total_trades') or mapping.get('total_trades') or 0
+    sell_trades = report.get('total_sell_trades')
+    win_count = report.get('win_count')
+    win_rate = report.get('session_win_rate')
+    if win_rate is None:
+        win_rate = report.get('trade_win_rate')
+    win_rate_calc = (win_count / sell_trades * 100) if (win_count and sell_trades) else None
+    commission = float(report.get('total_commission') or 0)
+    stamp_tax = float(report.get('total_stamp_tax') or 0)
+    commission_settings = report.get('commission_settings') or {}
+    review_coverage = review_meta.get('coverage') or {}
+    model = review_meta.get('model') or session.get('ai_model')
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+    lines = [
+        f'# {stock_name if stock_name != stock_code else stock_code} 交易复盘数据包',
+        '',
+        f'> 导出时间：{now}　用户：{username}　会话：{session_id}',
+        f'> 本文件包含该轮 AI 复盘实际读取的全部数据与 AI 复盘原文，用于在外部讨论买卖规则、仓位与卖出标准。',
+        '',
+        '## 一、训练概况',
+        '',
+        '| 项目 | 内容 |',
+        '| --- | --- |',
+        f'| 会话 ID | {_md_cell(session_id)} |',
+        f'| 股票 | {_md_cell(stock_code if stock_name == stock_code else f"{stock_name}（{stock_code}）")} |',
+        f'| 区间 | {_md_cell(report.get("start_date") or session.get("start_date"))} → {_md_cell(report.get("end_date") or session.get("end_date"))} |',
+        f'| K 线根数 | {len(bars)} |',
+        f'| 成交笔数 | {total_trades} |',
+        f'| 完整交易周期 | {mapping.get("cycles", 0)} 个 |',
+        f'| 复盘模型 | {_md_cell(model)} |',
+        f'| 复盘覆盖 | {review_coverage.get("used_trades", "—")} / {review_coverage.get("trades", total_trades)} 笔，重点交易 {review_coverage.get("key_trades", 0)} 笔 |',
+        '',
+        '## 二、核心指标',
+        '',
+        '| 指标 | 数值 |',
+        '| --- | --- |',
+        f'| 初始资金 | {_num(initial)} |',
+        f'| 期末资产 | {_num(final_capital)} |',
+        f'| 总收益率 | {_num(total_return)}% |',
+        f'| 最大回撤 | {_num(max_dd)}% |',
+        f'| 成交笔数（买+卖） | {total_trades} |',
+        f'| 卖出笔数 | {_md_cell(sell_trades)} |',
+        f'| 盈利卖出笔数 | {_md_cell(win_count)} |',
+        f'| 胜率（盈利卖出 / 卖出笔数） | {f"{win_rate_calc:.2f}%" if win_rate_calc is not None else "—"} |',
+        f'| 报告记录的胜率字段 | {_num(win_rate)}% |',
+        f'| 总佣金 | {_num(commission)} |',
+        f'| 总印花税 | {_num(stamp_tax)} |',
+        f'| 费用合计 | {_num(commission + stamp_tax)} |',
+        '',
+        '## 三、行情与资金逐 Bar 全量（AI 判断的原始数据）',
+        '',
+        f'共 {len(curve)} 个 Bar；净值指数以起始资金 100 为基准。成交量缺失时标「—」。',
+        '',
+        '| Bar | 日期 | 开 | 高 | 低 | 收 | 量 | 净值 | 收益率% | 持仓股 |',
+        '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',
+    ]
+    for point in curve:
+        bar_id = int(point.get('bar_id') or 0)
+        bar = bars.get(bar_id) or {}
+        vol = bar.get('volume')
+        lines.append(
+            f'| {bar_id} | {_fmt_curve_time(point.get("time") or bar.get("time"))} '
+            f'| {_num(bar.get("open"))} | {_num(bar.get("high"))} | {_num(bar.get("low"))} '
+            f'| {_num(point.get("close") if point.get("close") is not None else bar.get("close"))} '
+            f'| {_md_cell(vol if vol is not None else "—")} '
+            f'| {_num(point.get("equity_index"))} | {_num(point.get("return_pct"))} '
+            f'| {int(point.get("position_shares") or 0)} |'
+        )
+
+    lines += [
+        '',
+        '## 四、成交明细（全量，含持仓变化与交易周期）',
+        '',
+        f'- 原始成交 {mapping.get("total_trades", 0)} 笔；导出 {mapping.get("used_trades", 0)} 笔'
+        + ('（导出不做截断，全量列出）' if not mapping.get('truncated') else f'（有 {mapping.get("skipped_trades", 0)} 笔未进入逐笔表）'),
+        '- 口径：按当日收盘价成交，T+1；持仓变化由真实成交还原；周期按空仓→建仓→清仓划分。',
+        '',
+        '| fill_id | Bar | 日期 | 方向 | 手数 | 价格 | 金额 | 费用 | 持仓变化 | 动作类型 | 周期 | 映射 |',
+        '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',
+    ]
+    for fill in mapping['fills']:
+        lines.append(
+            f'| {fill["fill_id"]} | {fill["bar_id"]} | {_md_cell(fill.get("date"))} | {fill["side"]} '
+            f'| {fill["quantity"]} | {_num(fill["price"])} | {_num(fill.get("amount"))} '
+            f'| {fill["fee"]:.2f} | {fill["position_before"]}→{fill["position_after"]}股 '
+            f'| {fill["action_type"]} | {fill["trade_cycle_id"]} | {fill["mapping_status"]} |'
+        )
+    if not mapping['fills']:
+        origin = report.get('trade_details') or []
+        for idx, t in enumerate(origin, 1):
+            lines.append(
+                f'| F{idx:03d} | {_md_cell(t.get("bar_id"))} | {_md_cell(t.get("date"))} | {_md_cell(t.get("action"))} '
+                f'| {_md_cell(t.get("quantity"))} | {_num(t.get("price"))} | {_num(t.get("amount"))} | — | — | — | — | — |'
+            )
+
+    lines += [
+        '',
+        '## 五、成交窗口 K 线（AI 实际读取的那份）',
+        '',
+        '```text',
+        build_kline_windows(report, mapping),
+        '```',
+        '',
+        '## 六、逐 Bar 资金与持仓快照（AI 实际读取的那份）',
+        '',
+        '```text',
+        build_bar_snapshots(report, mapping, max_rows=len(curve) + 1 if curve else 1200),
+        '```',
+        '',
+        '## 七、重点交易深度点评（最多 3 笔）',
+        '',
+    ]
+    key_trades = review_meta.get('key_trade_reviews') or []
+    if key_trades:
+        for idx, item in enumerate(key_trades, 1):
+            lines += [
+                f'### {idx}. {_md_cell(item.get("trade_cycle_id"))} {_md_cell(item.get("title"))}',
+                '',
+                f'- 交易周期：{_md_cell(item.get("trade_cycle_id"))}',
+                f'- 概述：{_md_cell(item.get("summary"))}',
+                f'- 主要优点：{_md_cell(_md_join(item.get("strengths")))}',
+                f'- 核心问题：{_md_cell(_md_join(item.get("issues")))}',
+                f'- 经验总结：{_md_cell(item.get("lesson"))}',
+                f'- 后续改进：{_md_cell(_md_join(item.get("next_rules")))}',
+                f'- 证据成交：{_md_cell(_md_join(item.get("evidence_fill_ids")))}',
+                '',
+            ]
+    else:
+        lines += ['- 本轮没有保存重点交易点评。', '']
+
+    lines += ['## 八、历史问题档案（导出时快照）', '']
+    issue_list = issues or []
+    if issue_list:
+        lines += [
+            '| 问题 ID | 状态 | 问题描述 | 建议规则 | 用户备注 |',
+            '| --- | --- | --- | --- | --- |',
+        ]
+        for issue in issue_list:
+            lines.append(
+                f'| {_md_cell(issue.get("id"))} | {_md_cell(issue.get("status_user") or issue.get("status"))} '
+                f'| {_md_cell(issue.get("description"))} | {_md_cell(issue.get("recommended_rule"))} '
+                f'| {_md_cell(issue.get("user_note"))} |'
+            )
+    else:
+        lines.append('- 该用户还没有历史问题档案（本轮可能是首次复盘）。')
+    lines += [
+        '',
+        '## 九、AI 复盘原文',
+        '',
+        (_demote_markdown_headings(ai_analysis) or '- 本轮没有 AI 复盘原文（可能未开启 AI 分析或接口失败）。'),        '',
+        '## 十、口径与说明',
+        '',
+        f'- 成交价：当日收盘价；T+1（当日买入当日不可卖）。',
+        f'- 费用设置：佣金率 {commission_settings.get("commission_rate", "—")}、最低佣金 {commission_settings.get("min_commission", "—")}、印花税率 {commission_settings.get("stamp_tax_rate", "—")}。',
+        '- 成本与配对：按真实持仓变化还原，同一周期内用平均成本 + FIFO 作为分析约定，不代表券商原始批次。',
+        '- 评分体系：交易执行质量与收益表现两个维度独立打分，禁止合并成一个总分。',
+        '- 卖出评价口径：只按决策当时可见的信息（成本、浮盈、仓位、已完成 K 线、既定规则）判断；卖出之后的走势属于事后信息，不参与对错评判，也不允许对「提前止盈」与「持有回撤」使用两套相反标准。',
+        '',
+        f'*数据来源：用户 {username} 的本地训练库 session {session_id}（report_json + ai_analysis + review_meta）。*',
+    ]
+    return '\n'.join(lines)
 
 
 # ---------------------------------------------------------------- 提示词组装
@@ -2165,6 +2381,33 @@ def get_training_history_detail(username, session_id):
             'ai_analysis': record.get('ai_analysis'),
             'ai_updated_at': record.get('ai_updated_at')
         })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/users/<username>/history/<session_id>/export', methods=['GET'])
+def export_training_report_markdown(username, session_id):
+    """导出单期复盘的 Markdown 数据包（走势 + 全部数据 + AI 原文）"""
+    try:
+        record = user_manager.get_report_and_analysis(username, session_id)
+        report = record.get('report')
+        if not report:
+            return jsonify({'error': '这次训练没有保存报告，无法导出'}), 404
+        session = None
+        for item in user_manager.get_training_history(username, limit=500):
+            if item.get('session_id') == session_id:
+                session = item
+                break
+        try:
+            archive = review_history.load(user_manager.users_dir, username)
+            issues = archive.get('issues') or []
+        except Exception:
+            issues = []
+        markdown = build_report_export_markdown(
+            username, session_id, session, report,
+            record.get('ai_analysis'), record.get('review_meta'), issues
+        )
+        filename = f"{report.get('stock_code') or 'report'}_{session_id}_复盘数据包.md"
+        return jsonify({'markdown': markdown, 'filename': filename, 'chars': len(markdown)})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
