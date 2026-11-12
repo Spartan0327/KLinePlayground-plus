@@ -783,6 +783,21 @@ function setupEventListeners() {
     document.querySelectorAll('.ai-coach-chip').forEach((chip) => {
         chip.addEventListener('click', () => sendCoachQuestion(chip.dataset.q));
     });
+    const coachMessagesEl = document.getElementById('ai-coach-messages');
+    coachMessagesEl?.addEventListener('mouseover', (event) => {
+        const ref = event.target.closest('.coach-bar-ref');
+        if (ref) highlightChartBar(Number(ref.dataset.bar));
+    });
+    coachMessagesEl?.addEventListener('mouseout', (event) => {
+        const ref = event.target.closest('.coach-bar-ref');
+        if (ref) clearBarHighlight();
+    });
+    coachMessagesEl?.addEventListener('click', (event) => {
+        const ref = event.target.closest('.coach-bar-ref');
+        if (!ref) return;
+        event.preventDefault();
+        highlightChartBar(Number(ref.dataset.bar), true);
+    });
     document.getElementById('equity-scale-linear')?.addEventListener('click', () => applyEquityScaleMode(false));
     document.getElementById('equity-scale-log')?.addEventListener('click', () => applyEquityScaleMode(true));
     document.getElementById('ai-analyze-btn').addEventListener('click', requestAIAnalysis);
@@ -5265,6 +5280,7 @@ function setCoachContext(text) {
 
 function resetCoachChat(closePanel = false) {
     coachHistory = [];
+    clearBarHighlight();
     const box = document.getElementById('ai-coach-messages');
     if (box) {
         box.innerHTML = '<div class="ai-coach-empty">陪练只读取当前 Bar 及之前的 K 线、指标和你的持仓。它不会预测后面怎么走，也不会替你下单。<br>先推进几根 K 线，再问它结构、量能或仓位问题。</div>';
@@ -5292,13 +5308,83 @@ function toggleCoachPanel(forceVisible) {
     }
 }
 
+function renderCoachText(text) {
+    const safe = escapeHtml(text);
+    return safe.replace(/\b(BAR|Bar|bar)\s*(-?\d+)\b/g, (_, _label, barId) =>
+        `<span class="coach-bar-ref" data-bar="${barId}" title="在图上高亮 Bar ${barId}">Bar ${barId}</span>`);
+}
+
+function findRenderedBar(barId) {
+    const list = latestRenderedKlineData || [];
+    return list.find((bar) => Number(bar.bar_id) === barId) || null;
+}
+
+function clearBarHighlight() {
+    try {
+        if (chart) chart.clearCrosshairPosition();
+        if (volumeChart) volumeChart.clearCrosshairPosition();
+    } catch (error) { /* 图表未初始化时忽略 */ }
+    document.querySelectorAll('.bar-highlight-overlay').forEach((el) => el.remove());
+}
+
+function drawBarHighlight(bar) {
+    const chartEl = document.getElementById('chart');
+    const container = chartEl && chartEl.parentElement;
+    if (!chartEl || !container || !chart || !candlestickSeries) return;
+    const x = chart.timeScale().timeToCoordinate(bar.time);
+    const yHigh = candlestickSeries.priceToCoordinate(bar.high);
+    const yLow = candlestickSeries.priceToCoordinate(bar.low);
+    let overlay = container.querySelector('.bar-highlight-overlay');
+    if (x == null || yHigh == null || yLow == null) {
+        overlay?.remove();
+        return;
+    }
+    if (!overlay) {
+        overlay = document.createElement('div');
+        overlay.className = 'bar-highlight-overlay';
+        container.appendChild(overlay);
+    }
+    const index = latestRenderedKlineData.indexOf(bar);
+    const neighbor = latestRenderedKlineData[index + 1] || latestRenderedKlineData[index - 1];
+    const neighborX = neighbor ? chart.timeScale().timeToCoordinate(neighbor.time) : null;
+    const width = neighborX != null ? Math.max(3, Math.abs(neighborX - x)) : 8;
+    overlay.style.left = `${chartEl.offsetLeft + x - width / 2}px`;
+    overlay.style.top = `${chartEl.offsetTop + Math.min(yHigh, yLow) - 6}px`;
+    overlay.style.width = `${width}px`;
+    overlay.style.height = `${Math.abs(yLow - yHigh) + 12}px`;
+}
+
+function highlightChartBar(barId, focus = false) {
+    const bar = findRenderedBar(barId);
+    if (!bar || !chart || !candlestickSeries) return false;
+    if (focus) {
+        const index = latestRenderedKlineData.indexOf(bar);
+        chart.timeScale().setVisibleLogicalRange({
+            from: Math.max(0, index - 15),
+            to: Math.min(latestRenderedKlineData.length - 1, index + 15),
+        });
+    }
+    try {
+        chart.setCrosshairPosition(bar.close, bar.time, candlestickSeries);
+        if (volumeChart && volumeSeries) volumeChart.setCrosshairPosition(bar.volume, bar.time, volumeSeries);
+    } catch (error) {
+        console.warn('Bar 高亮失败:', error);
+    }
+    requestAnimationFrame(() => drawBarHighlight(bar));
+    return true;
+}
+
 function appendCoachMessage(role, content, meta) {
     const box = document.getElementById('ai-coach-messages');
     if (!box) return;
     box.querySelector('.ai-coach-empty')?.remove();
     const bubble = document.createElement('div');
     bubble.className = `ai-coach-msg ${role}`;
-    bubble.textContent = content;
+    if (role === 'assistant') {
+        bubble.innerHTML = renderCoachText(content);
+    } else {
+        bubble.textContent = content;
+    }
     if (meta) {
         const note = document.createElement('div');
         note.className = 'ai-coach-meta';

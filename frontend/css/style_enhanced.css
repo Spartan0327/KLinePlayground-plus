@@ -2765,3 +2765,30 @@ body[data-theme="dark"] .history-item {
         border-radius: 16px 16px 0 0;
     }
 }
+
+/* 陪练回答里的 Bar 引用 → 图上高亮 */
+.coach-bar-ref {
+    display: inline-block;
+    padding: 0 4px;
+    border-radius: 4px;
+    background: rgba(245, 197, 66, 0.16);
+    border: 1px solid rgba(245, 197, 66, 0.5);
+    color: inherit;
+    cursor: pointer;
+    font-variant-numeric: tabular-nums;
+}
+
+.coach-bar-ref:hover {
+    background: rgba(245, 197, 66, 0.34);
+    border-color: rgba(245, 197, 66, 0.9);
+}
+
+.bar-highlight-overlay {
+    position: absolute;
+    pointer-events: none;
+    z-index: 6;
+    background: rgba(245, 197, 66, 0.22);
+    border: 1px solid rgba(245, 197, 66, 0.9);
+    border-radius: 3px;
+    box-shadow: 0 0 12px rgba(245, 197, 66, 0.5);
+}
