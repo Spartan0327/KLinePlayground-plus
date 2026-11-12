@@ -23,6 +23,25 @@ if project_root not in sys.path:
 # 导入后端应用
 from backend.app_enhanced import app
 
+
+class DesktopApi:
+    """暴露给前端的最小桌面能力：把导出内容直接写入系统下载目录。"""
+
+    def save_export(self, markdown, filename):
+        if not isinstance(markdown, str) or not markdown:
+            return {'error': '导出内容为空'}
+
+        name = os.path.basename(str(filename or '复盘数据包.md')).replace('\x00', '')
+        if not name.lower().endswith('.md'):
+            name += '.md'
+
+        downloads = Path.home() / 'Downloads'
+        downloads.mkdir(parents=True, exist_ok=True)
+        target = downloads / name
+        target.write_text(markdown, encoding='utf-8')
+        return {'path': str(target)}
+
+
 class KLineTrainerApp:
     # WebView2 / Chromium 会拒绝加载这些“不安全端口”（如 5060 SIP、6000 X11 等），
     # 一旦随机分到就会显示 ERR_UNSAFE_PORT，白屏打不开界面
@@ -179,6 +198,7 @@ def main():
             url=f"http://127.0.0.1:{app_instance.port}/",
             width=1400,
             height=900,
+            js_api=DesktopApi(),
             # min_size=(1200, 800),
             # maximized=True,
             # resizable=False,
@@ -192,6 +212,9 @@ def main():
         print("关闭窗口即可退出程序")
         print("=" * 60)
         
+        # PyWebView 默认会取消所有下载（ALLOW_DOWNLOADS=False），
+        # 导致「导出复盘数据包（MD）」点击后没有任何文件。开启后会弹出另存为窗口。
+        webview.settings['ALLOW_DOWNLOADS'] = True
         # 启动PyWebView
         # webview.start(debug=True)
         webview.start(debug=False)

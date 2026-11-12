@@ -5658,6 +5658,14 @@ async function sendCoachQuestion(rawQuestion) {
     }
 }
 
+async function tryDesktopExport(markdown, filename) {
+    const api = window.pywebview && window.pywebview.api;
+    if (!api || typeof api.save_export !== 'function') return null;
+    const result = await api.save_export(markdown, filename);
+    if (result && result.path) return result.path;
+    throw new Error((result && result.error) || '桌面端保存失败');
+}
+
 async function exportReportMarkdown() {
     const sid = (currentReportData && currentReportData.session_id)
         || (currentTraining && (currentTraining.id || currentTraining.session_id));
@@ -5669,7 +5677,14 @@ async function exportReportMarkdown() {
         const res = await fetch(`${API_BASE}/users/${encodeURIComponent(currentUser)}/history/${encodeURIComponent(sid)}/export`);
         const data = await res.json();
         if (!res.ok) { alert(data.error || '导出失败'); return; }
-        const blob = new Blob([data.markdown || ''], { type: 'text/markdown;charset=utf-8' });
+        const markdown = data.markdown || '';
+        const filename = data.filename || '复盘数据包.md';
+        const desktopPath = await tryDesktopExport(markdown, filename);
+        if (desktopPath) {
+            alert(`已导出到:\n${desktopPath}`);
+            return;
+        }
+        const blob = new Blob([markdown], { type: 'text/markdown;charset=utf-8' });
         const a = document.createElement('a');
         a.href = URL.createObjectURL(blob);
         a.download = data.filename || '复盘数据包.md';
