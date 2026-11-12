@@ -138,6 +138,7 @@ class HistoryManager:
 
     def start_training_session(self, username: str, session_data: Dict) -> bool:
         """开始新的训练会话"""
+        conn = None
         try:
             self._init_user_history_db(username)
             db_path = self._get_user_db_path(username)
@@ -166,10 +167,13 @@ class HistoryManager:
             return True
         except Exception as e:
             print(f"开始训练会话失败: {e}")
+            if conn is not None:
+                conn.close()
             return False
     
     def record_bar_state(self, username: str, session_id: str, bar_data: Dict) -> bool:
         """记录每个bar的状态"""
+        conn = None
         try:
             db_path = self._get_user_db_path(username)
             
@@ -204,10 +208,13 @@ class HistoryManager:
             return True
         except Exception as e:
             print(f"记录bar状态失败: {e}")
+            if conn is not None:
+                conn.close()
             return False
     
     def record_trade(self, username: str, session_id: str, trade_data: Dict) -> bool:
         """记录交易"""
+        conn = None
         try:
             db_path = self._get_user_db_path(username)
             
@@ -240,10 +247,13 @@ class HistoryManager:
             return True
         except Exception as e:
             print(f"记录交易失败: {e}")
+            if conn is not None:
+                conn.close()
             return False
     
     def complete_training_session(self, username: str, session_id: str, completion_data: Dict) -> bool:
         """完成训练会话（即使一笔未交易也要落库，否则历史里看不到这次训练）"""
+        conn = None
         try:
             self._init_user_history_db(username)
             db_path = self._get_user_db_path(username)
@@ -282,6 +292,8 @@ class HistoryManager:
             return True
         except Exception as e:
             print(f"完成训练会话失败: {e}")
+            if conn is not None:
+                conn.close()
             return False
     
     def _update_user_statistics(self, cursor, username: str, completion_data: Dict):

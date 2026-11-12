@@ -4,6 +4,8 @@ import os
 import sys
 import json
 import base64
+import gc
+import time
 import requests
 from datetime import datetime, timedelta
 import sqlite3
@@ -42,6 +44,8 @@ data_dir_path = os.path.join(project_root, 'data')
 
 # 初始化管理器
 data_manager = DataManager(data_dir=data_dir_path)
+# 股票列表缺失时在后台加载/下载，避免首个请求在请求线程里同步等待网络
+data_manager.ensure_stock_list_async()
 # user_manager = UserManager()
 user_manager = UserManagerEnhanced(users_dir=users_dir_path)
 active_trainings = {}  # 存储活跃的训练会话
@@ -87,10 +91,21 @@ def delete_user(username):
         if not user_manager.user_exists(username):
             return jsonify({'error': '用户不存在'}), 404
 
-        if user_manager.delete_user(username):
+        # 先丢弃该用户仍在内存里的训练会话，释放数据库句柄，否则 Windows 上删目录会被占用
+        for training_id in [key for key, value in active_trainings.items() if value.get('user') == username]:
+            active_trainings.pop(training_id, None)
+
+        deleted = False
+        for _ in range(3):
+            if user_manager.delete_user(username):
+                deleted = True
+                break
+            gc.collect()
+            time.sleep(0.2)
+
+        if deleted:
             return jsonify({'message': '用户删除成功'})
-        else:
-            return jsonify({'error': '删除用户失败'}), 500
+        return jsonify({'error': '删除用户失败：该用户的数据库仍被占用，请先结束训练或重启程序后再删'}), 500
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -1420,7 +1435,7 @@ def start_training():
     """开始新的训练"""
     try:
         data = request.get_json()
-        user = data.get('user')
+        user = data.get('user') or data.get('username')
         mode = data.get('mode')
         data_source = data.get('data_source', 'akshare')
         period = data.get('period', 'daily')
@@ -1429,8 +1444,13 @@ def start_training():
         if not user:
             return jsonify({'error': '用户名不能为空'}), 400
         
-        # 创建训练会话
-        training_id = f"{user}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        # 创建训练会话；同一秒内连续开始两次时给 ID 加后缀，避免撞上已有会话或历史库
+        base_id = f"{user}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        training_id = base_id
+        suffix = 1
+        while training_id in active_trainings:
+            suffix += 1
+            training_id = f"{base_id}_{suffix}"
         
         session_end_date = data.get('end_date')
 
@@ -2043,7 +2063,9 @@ def get_stock_universe():
         return jsonify({
             'market': market,
             'count': len(stock_codes),
-            'stock_codes': stock_codes
+            'stock_codes': stock_codes,
+            'stock_list_ready': data_manager.stock_list is not None,
+            'stock_list_pending': data_manager.is_stock_list_pending(),
         })
     except Exception as e:
         return jsonify({'error': str(e)}), 500

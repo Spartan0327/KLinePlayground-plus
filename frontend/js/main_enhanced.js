@@ -1710,6 +1710,9 @@ async function syncOfflineData() {
 
             const stockCodes = universePayload.stock_codes || [];
             if (stockCodes.length === 0) {
+                if (universePayload.stock_list_pending) {
+                    throw new Error('股票列表还在后台下载，稍等片刻再试');
+                }
                 throw new Error('当前市场没有可补数的股票列表');
             }
 
@@ -2225,7 +2228,7 @@ async function startTraining() {
     const isRandomMode = document.querySelector('.tab-btn.active').dataset.tab === 'random';
     const initialCapital = parseFloat(document.getElementById('initial-capital').value);
     const dataSource = document.getElementById('data-source').value || 'akshare';
-    const period = 'daily';
+    const period = document.getElementById('kline-period')?.value || 'daily';
 
     let trainingConfig = {
         user: currentUser,
@@ -2253,7 +2256,7 @@ async function startTraining() {
     }
 
     try {
-        updatePeriodBadge('daily');
+        updatePeriodBadge(period);
         showLoading(
             dataSource === 'offline' ? '正在筛选本地离线数据' : '正在创建训练',
             dataSource === 'offline' ? '首次校验离线股票可用范围时会稍慢一些。' : '正在准备图表和训练数据...'
@@ -2268,7 +2271,7 @@ async function startTraining() {
 
         if (response.ok) {
             currentTraining = await response.json();
-            currentTraining.period = 'daily';
+            currentTraining.period = period;
             currentReportData = null;
             hideTrainingSetup();
             document.getElementById('report-interface').classList.add('hidden');

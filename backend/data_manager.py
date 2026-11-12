@@ -2,6 +2,7 @@ import csv
 import json
 import os
 import random
+import threading
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 
@@ -40,6 +41,8 @@ class DataManager:
 
         self.stock_list = None
         self.stock_names: Dict[str, str] = {}
+        self._stock_list_loading = False
+        self._stock_list_lock = threading.Lock()
         self._offline_stock_codes_cache: Optional[List[str]] = None
         self._offline_date_range_cache: Dict[str, Optional[Tuple[pd.Timestamp, pd.Timestamp]]] = {}
 
@@ -62,8 +65,8 @@ class DataManager:
             print(f"下载股票列表失败: {e}")
             return False
 
-    def load_stock_list(self) -> bool:
-        """加载股票列表缓存。"""
+    def load_stock_list(self, allow_download: bool = True) -> bool:
+        """加载股票列表缓存；allow_download=False 时只读本地缓存，绝不联网。"""
         try:
             stock_list_path = os.path.join(self.data_dir, "stock_list.csv")
             names_path = os.path.join(self.data_dir, "stock_names.json")
@@ -74,10 +77,36 @@ class DataManager:
                     self.stock_names = json.load(f)
                 return True
 
+            if not allow_download:
+                return False
             return self.download_stock_list()
         except Exception as e:
             print(f"加载股票列表失败: {e}")
+            if not allow_download:
+                return False
             return self.download_stock_list()
+
+    def ensure_stock_list_async(self) -> None:
+        """后台加载/下载股票列表，避免首个 HTTP 请求在请求线程里同步等待网络。"""
+        if self.stock_list is not None:
+            return
+        with self._stock_list_lock:
+            if self._stock_list_loading:
+                return
+            self._stock_list_loading = True
+
+        def _load():
+            try:
+                self.load_stock_list(allow_download=True)
+            finally:
+                with self._stock_list_lock:
+                    self._stock_list_loading = False
+
+        threading.Thread(target=_load, name="stock-list-loader", daemon=True).start()
+
+    def is_stock_list_pending(self) -> bool:
+        """股票列表是否仍在后台加载中。"""
+        return self.stock_list is None and self._stock_list_loading
 
     def get_available_sources(self) -> List[Dict]:
         """返回当前可用数据源列表。"""
@@ -363,7 +392,7 @@ class DataManager:
 
     def get_stock_universe(self, market: str = "all") -> List[str]:
         if self.stock_list is None:
-            self.load_stock_list()
+            self.load_stock_list(allow_download=False)
 
         market_key = (market or "all").lower()
         if self.stock_list is None or self.stock_list.empty:
@@ -996,7 +1025,7 @@ class DataManager:
     def get_stock_name(self, stock_code: str) -> str:
         stock_code = self._normalize_stock_code(stock_code)
         if not self.stock_names:
-            self.load_stock_list()
+            self.load_stock_list(allow_download=False)
         return self.stock_names.get(stock_code, f"股票{stock_code}")
 
     def get_training_validation_error(
@@ -1079,7 +1108,7 @@ class DataManager:
             return stock_code, self._random_date_in_range(available_start, available_end)
 
         if self.stock_list is None:
-            self.load_stock_list()
+            self.load_stock_list(allow_download=False)
 
         if self.stock_list is None or self.stock_list.empty:
             raise ValueError("股票列表为空，无法随机选择股票")
@@ -1376,7 +1405,7 @@ class DataManager:
         """批量下载股票数据。"""
         if stock_codes is None:
             if self.stock_list is None:
-                self.load_stock_list()
+                self.load_stock_list(allow_download=False)
             stock_codes = self.stock_list["code"].tolist()
 
         total = len(stock_codes)
