@@ -2956,6 +2956,32 @@ def export_training_report_markdown(username, session_id):
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/report-exports', methods=['DELETE'])
+def clear_report_exports():
+    """清除 report_exports 目录下的全部 Markdown 数据包。"""
+    try:
+        os.makedirs(report_export_dir_path, exist_ok=True)
+        deleted = []
+        failed = []
+        for entry in os.scandir(report_export_dir_path):
+            if not entry.is_file() or not entry.name.lower().endswith('.md'):
+                continue
+            try:
+                os.remove(entry.path)
+                deleted.append(entry.name)
+            except Exception as e:
+                failed.append({'filename': entry.name, 'error': str(e)})
+        return jsonify({
+            'success': not failed,
+            'path': report_export_dir_path,
+            'deleted': deleted,
+            'failed': failed,
+            'deleted_count': len(deleted),
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/users/<username>/history/<session_id>/export-file', methods=['POST'])
 def save_training_report_markdown(username, session_id):
     """把复盘数据包直接写入项目下的 report_exports 目录。"""
@@ -2986,6 +3012,38 @@ def delete_training_history(username, session_id):
         return jsonify({'success': True, 'session_id': session_id})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+@app.route('/api/users/<username>/history/batch-delete', methods=['POST'])
+def delete_training_history_batch(username):
+    """批量删除历史训练记录（含报告与 AI 点评）。"""
+    try:
+        data = request.get_json(silent=True) or {}
+        session_ids = data.get('session_ids')
+        if not isinstance(session_ids, list) or not session_ids:
+            return jsonify({'error': '请选择要删除的历史记录'}), 400
+        ids = list(dict.fromkeys(str(sid) for sid in session_ids if sid))
+        if not ids:
+            return jsonify({'error': '请选择要删除的历史记录'}), 400
+
+        deleted = []
+        failed = []
+        for sid in ids:
+            try:
+                if user_manager.delete_training_session(username, sid):
+                    deleted.append(sid)
+                else:
+                    failed.append({'session_id': sid, 'error': '记录不存在或已被删除'})
+            except Exception as e:
+                failed.append({'session_id': sid, 'error': str(e)})
+        return jsonify({
+            'success': not failed,
+            'deleted': deleted,
+            'failed': failed,
+            'deleted_count': len(deleted),
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 
 @app.route('/api/users/<username>/history/<session_id>/ai', methods=['POST'])
 def analyze_history_session(username, session_id):

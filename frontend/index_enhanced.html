@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>A股K线复盘训练器</title>
     <link rel="icon" href="data:;base64,iVBORw0KGgo=">
-    <link rel="stylesheet" href="css/style_enhanced.css?v=20261113p">
+    <link rel="stylesheet" href="css/style_enhanced.css?v=20261113q">
     <script src="js/lightweight-charts.standalone.production.js"></script>
     <style>
         .checkbox-inline-row {
@@ -86,12 +86,34 @@
                     <h2>历史训练记录</h2>
                     <p class="history-panel-subtitle">每次训练结束后自动保存报告与 AI 复盘点评，点开任意一条即可回看当时的收益、回撤和交易明细。</p>
                 </div>
-                <button id="history-refresh-btn" class="btn btn-secondary">刷新列表</button>
+                <div class="history-panel-actions">
+                    <label class="history-select-all">
+                        <input type="checkbox" id="history-select-all">
+                        <span>全选</span>
+                    </label>
+                    <button id="history-batch-delete-btn" class="btn btn-danger" disabled>批量删除</button>
+                    <button id="history-refresh-btn" class="btn btn-secondary">刷新列表</button>
+                </div>
             </div>
             <div id="history-list" class="history-list"></div>
             <div id="history-empty" class="history-empty hidden">
                 还没有历史训练记录。完成一轮训练（点右侧「结束训练」）后，记录会自动出现在这里。
                 <br>（旧版本训练没有保存明细，无法补录；从这里之后每次训练都会完整记录报告与 AI 点评。）
+            </div>
+        </div>
+
+        <div id="history-delete-confirm-modal" class="modal hidden">
+            <div class="modal-content history-delete-confirm-content" role="dialog" aria-modal="true" aria-labelledby="history-delete-confirm-title">
+                <h2 id="history-delete-confirm-title">确认删除历史记录</h2>
+                <p id="history-delete-confirm-message"></p>
+                <label class="history-delete-suppress">
+                    <input type="checkbox" id="history-delete-no-prompt">
+                    <span>以后删除时不再提示</span>
+                </label>
+                <div class="modal-actions">
+                    <button id="history-delete-cancel-btn" class="btn btn-secondary">取消</button>
+                    <button id="history-delete-confirm-btn" class="btn btn-danger">确认删除</button>
+                </div>
             </div>
         </div>
 
@@ -696,6 +718,7 @@
                 <div class="report-actions">
                     <button id="view-full-chart-btn" class="btn btn-primary">查看完整走势</button>
                     <button id="export-report-md-btn" class="btn btn-secondary">导出复盘数据包（MD）</button>
+                    <button id="clear-report-exports-btn" class="btn btn-danger">清除数据包</button>
                     <button id="ai-analyze-btn" class="btn btn-info hidden">AI 智能复盘点评</button>
                     <button id="new-training-from-report-btn" class="btn btn-secondary">开始新训练</button>
                     <button id="return-main-menu-btn" class="btn btn-secondary">返回主菜单</button>
@@ -752,6 +775,6 @@
     </div>
 
     <script src="js/marked.min.js"></script>
-    <script src="js/main_enhanced.js?v=20261113p"></script>
+    <script src="js/main_enhanced.js?v=20261113q"></script>
 </body>
 </html>

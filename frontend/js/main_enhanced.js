@@ -780,6 +780,7 @@ function setupEventListeners() {
     // 复盘报告
     document.getElementById('view-full-chart-btn').addEventListener('click', viewFullChart);
     document.getElementById('export-report-md-btn').addEventListener('click', exportReportMarkdown);
+    document.getElementById('clear-report-exports-btn')?.addEventListener('click', clearReportExports);
     // AI 实时陪练
     document.getElementById('ai-coach-btn')?.addEventListener('click', () => toggleCoachPanel());
     document.getElementById('ai-coach-close-btn')?.addEventListener('click', () => toggleCoachPanel(false));
@@ -821,6 +822,16 @@ function setupEventListeners() {
 
     // 历史训练记录
     document.getElementById('history-refresh-btn')?.addEventListener('click', loadTrainingHistory);
+    document.getElementById('history-select-all')?.addEventListener('change', (event) => {
+        document.querySelectorAll('#history-list .history-select').forEach(box => {
+            box.checked = event.target.checked;
+        });
+        updateHistorySelection();
+    });
+    document.getElementById('history-list')?.addEventListener('change', (event) => {
+        if (event.target.classList.contains('history-select')) updateHistorySelection();
+    });
+    document.getElementById('history-batch-delete-btn')?.addEventListener('click', batchDeleteHistorySessions);
 
     // 历史问题档案
     document.getElementById('review-history-btn')?.addEventListener('click', openReviewHistory);
@@ -1144,12 +1155,72 @@ async function loadTrainingHistory() {
         listEl.innerHTML = '';
         if (!items.length) {
             if (emptyEl) emptyEl.classList.remove('hidden');
+            updateHistorySelection();
             return;
         }
         if (emptyEl) emptyEl.classList.add('hidden');
         items.forEach(item => listEl.appendChild(buildHistoryItem(item)));
+        updateHistorySelection();
     } catch (error) {
         console.error('加载历史训练失败:', error);
+    }
+}
+
+function updateHistorySelection() {
+    const boxes = Array.from(document.querySelectorAll('#history-list .history-select'));
+    const selected = boxes.filter(box => box.checked);
+    boxes.forEach(box => {
+        const row = box.closest('.history-item');
+        if (row) row.classList.toggle('selected', box.checked);
+    });
+    const selectAll = document.getElementById('history-select-all');
+    if (selectAll) {
+        selectAll.checked = boxes.length > 0 && selected.length === boxes.length;
+        selectAll.indeterminate = selected.length > 0 && selected.length < boxes.length;
+        selectAll.disabled = boxes.length === 0;
+    }
+    const batchBtn = document.getElementById('history-batch-delete-btn');
+    if (batchBtn) {
+        batchBtn.disabled = selected.length === 0;
+        batchBtn.textContent = selected.length ? `批量删除 (${selected.length})` : '批量删除';
+    }
+}
+
+async function batchDeleteHistorySessions() {
+    if (!currentUser) return;
+    const boxes = Array.from(document.querySelectorAll('#history-list .history-select:checked'));
+    if (!boxes.length) return;
+    const count = boxes.length;
+    const tip = `确定删除选中的 ${count} 条历史训练记录吗？\n保存的报告和 AI 点评会一并删除，且不可恢复。`;
+    if (!(await confirmHistoryDelete(tip))) return;
+
+    const ids = boxes.map(box => box.dataset.sessionId).filter(Boolean);
+    try {
+        const response = await fetch(`${API_BASE}/users/${encodeURIComponent(currentUser)}/history/batch-delete`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ session_ids: ids }),
+        });
+        const data = await response.json();
+        if (!response.ok) {
+            alert(data.error || '批量删除失败');
+            return;
+        }
+        if (data.failed && data.failed.length) {
+            alert(`已删除 ${data.deleted_count || 0} 条，另有 ${data.failed.length} 条删除失败，列表已刷新。`);
+            loadTrainingHistory();
+        } else {
+            boxes.forEach(box => box.closest('.history-item')?.remove());
+            const listEl = document.getElementById('history-list');
+            if (listEl && listEl.children.length === 0) {
+                document.getElementById('history-empty')?.classList.remove('hidden');
+            }
+            updateHistorySelection();
+        }
+        loadUserStatistics();
+    } catch (error) {
+        console.error('批量删除历史训练失败:', error);
+        alert('批量删除失败，请确认后端服务正常。');
     }
 }
 
@@ -1171,6 +1242,9 @@ function buildHistoryItem(item) {
     const aiBadge = item.has_ai_analysis ? '<span class="history-badge ai">已存 AI 点评</span>' : '';
 
     wrap.innerHTML = `
+        <label class="history-select-wrap" title="选择这条记录">
+            <input type="checkbox" class="history-select" data-session-id="${escapeHtml(item.session_id || '')}">
+        </label>
         <div class="history-item-main">
             <div class="history-item-title">
                 <span>${nameText || item.stock_code || '未知标的'}</span>
@@ -1216,6 +1290,55 @@ function buildHistoryItem(item) {
 /**
  * 删除一条历史训练记录（含保存的报告与 AI 点评），删除后无法恢复
  */
+const HISTORY_DELETE_SKIP_KEY = 'klineplayground_skip_history_delete_confirm';
+let historyDeletePromptResolver = null;
+
+function resolveHistoryDeletePrompt(confirmed) {
+    const modal = document.getElementById('history-delete-confirm-modal');
+    if (modal) modal.classList.add('hidden');
+    const resolve = historyDeletePromptResolver;
+    historyDeletePromptResolver = null;
+    if (resolve) resolve(confirmed);
+}
+
+function setupHistoryDeleteConfirm() {
+    const modal = document.getElementById('history-delete-confirm-modal');
+    if (!modal || modal.dataset.bound === '1') return;
+    modal.dataset.bound = '1';
+    document.getElementById('history-delete-cancel-btn')?.addEventListener('click', () => resolveHistoryDeletePrompt(false));
+    document.getElementById('history-delete-confirm-btn')?.addEventListener('click', () => {
+        const checkbox = document.getElementById('history-delete-no-prompt');
+        if (checkbox && checkbox.checked) {
+            try { localStorage.setItem(HISTORY_DELETE_SKIP_KEY, '1'); } catch (e) { }
+        }
+        resolveHistoryDeletePrompt(true);
+    });
+    modal.addEventListener('click', (event) => {
+        if (event.target === modal) resolveHistoryDeletePrompt(false);
+    });
+    document.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape' && !modal.classList.contains('hidden')) {
+            resolveHistoryDeletePrompt(false);
+        }
+    });
+}
+
+function confirmHistoryDelete(tip) {
+    try {
+        if (localStorage.getItem(HISTORY_DELETE_SKIP_KEY) === '1') return Promise.resolve(true);
+    } catch (e) { }
+    const modal = document.getElementById('history-delete-confirm-modal');
+    if (!modal) return Promise.resolve(window.confirm(tip));
+    setupHistoryDeleteConfirm();
+    if (historyDeletePromptResolver) resolveHistoryDeletePrompt(false);
+    const messageEl = document.getElementById('history-delete-confirm-message');
+    if (messageEl) messageEl.textContent = tip;
+    const checkbox = document.getElementById('history-delete-no-prompt');
+    if (checkbox) checkbox.checked = false;
+    modal.classList.remove('hidden');
+    return new Promise(resolve => { historyDeletePromptResolver = resolve; });
+}
+
 async function deleteHistorySession(item, wrapEl) {
     if (!currentUser || !item || !item.session_id) return;
 
@@ -1224,7 +1347,7 @@ async function deleteHistorySession(item, wrapEl) {
     const tip = isRunning
         ? `这条「${label}」还标记为「进行中」，删除后无法继续训练。\n确定删除这次训练记录吗？（删除后不可恢复）`
         : `确定删除「${label}」这次训练记录吗？保存的报告和 AI 点评会一并删除，且不可恢复。`;
-    if (!confirm(tip)) return;
+    if (!(await confirmHistoryDelete(tip))) return;
 
     try {
         const response = await fetch(`${API_BASE}/users/${currentUser}/history/${item.session_id}`, {
@@ -1248,6 +1371,7 @@ async function deleteHistorySession(item, wrapEl) {
             const emptyEl = document.getElementById('history-empty');
             if (emptyEl) emptyEl.classList.remove('hidden');
         }
+        updateHistorySelection();
         loadUserStatistics();
     } catch (error) {
         console.error('删除历史训练失败:', error);
@@ -5974,6 +6098,22 @@ async function exportReportMarkdown() {
     } catch (e) {
         console.error('导出复盘数据包失败:', e);
         alert('导出失败');
+    }
+}
+
+async function clearReportExports() {
+    if (!confirm('确定清除 report_exports 目录下的全部 Markdown 数据包吗？\n此操作不可恢复。')) return;
+    try {
+        const res = await fetch(`${API_BASE}/report-exports`, { method: 'DELETE' });
+        const data = await res.json();
+        if (!res.ok) {
+            alert(data.error || '清除数据包失败');
+            return;
+        }
+        alert(`已清除 ${data.deleted_count || 0} 个数据包。\n目录：${data.path || 'report_exports'}`);
+    } catch (error) {
+        console.error('清除数据包失败:', error);
+        alert('清除数据包失败，请确认后端服务正常。');
     }
 }
 
